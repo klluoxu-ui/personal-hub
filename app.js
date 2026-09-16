@@ -70,6 +70,250 @@ function todayShift() {
   return state.shifts.find((item) => item.date === today());
 }
 
+let shiftImport = null;
+const SHIFT_NAME_KEY = "personal-hub-shift-name";
+const XLSX_SRC = "https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.mini.min.js";
+
+function pad2(value) {
+  return String(value).padStart(2, "0");
+}
+
+function isoDate(year, month, day) {
+  return `${year}-${pad2(month)}-${pad2(day)}`;
+}
+
+function loadXlsx() {
+  if (window.XLSX) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = XLSX_SRC;
+    script.onload = resolve;
+    script.onerror = () => reject(new Error("xlsx"));
+    document.head.appendChild(script);
+  });
+}
+
+function cellText(value) {
+  if (value == null || value === "") return "";
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return `${value.getDate()}-${["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][value.getMonth()]}`;
+  }
+  return String(value).replace(/\s+/g, " ").trim();
+}
+
+function isPersonName(value) {
+  const name = cellText(value);
+  if (!name || name.length > 12) return false;
+  if (/合计|汇总|total|班次|工号|姓名|当日|工作安排|^ot\b|ccd|^[abc]$/i.test(name)) return false;
+  if (/^sc\d/i.test(name)) return false;
+  return /[\u4e00-\u9fff]/.test(name);
+}
+
+function normalizeShift(raw) {
+  const value = cellText(raw);
+  if (!value) return "";
+  const upper = value.toUpperCase();
+  if (["OFF", "AL", "休", "休息", "年假", "LEAVE"].includes(upper) || value === "休" || value === "年假") return "休息";
+  return value;
+}
+
+function findYearMonth(rows) {
+  const blob = rows.slice(0, 8).flat().map(cellText).join(" ");
+  const yearMatch = blob.match(/(20\d{2})/);
+  const monthMatch = blob.match(/(\d{1,2})\s*月/);
+  return {
+    year: yearMatch ? Number(yearMatch[1]) : new Date().getFullYear(),
+    month: monthMatch ? Number(monthMatch[1]) : new Date().getMonth() + 1,
+  };
+}
+
+function findDayHeader(rows) {
+  let best = null;
+  const limit = Math.min(rows.length, 20);
+  for (let r = 0; r < limit; r += 1) {
+    const days = [];
+    (rows[r] || []).forEach((cell, c) => {
+      const text = cellText(cell);
+      if (/^\d{1,2}$/.test(text)) {
+        const day = Number(text);
+        if (day >= 1 && day <= 31) days.push({ day, col: c });
+      }
+    });
+    const unique = [];
+    const seen = new Set();
+    days.forEach((item) => {
+      if (seen.has(item.day)) return;
+      seen.add(item.day);
+      unique.push(item);
+    });
+    if (unique.length >= 20 && (!best || unique.length > best.days.length)) {
+      best = { row: r, days: unique };
+    }
+  }
+  return best;
+}
+
+function findNameCol(rows) {
+  for (let r = 0; r < Math.min(rows.length, 25); r += 1) {
+    const cols = rows[r] || [];
+    for (let c = 0; c < cols.length; c += 1) {
+      if (cellText(cols[c]) === "姓名") return { row: r, col: c };
+    }
+  }
+  return null;
+}
+
+function parseArrangeDate(value, year) {
+  const text = cellText(value);
+  const months = {
+    jan: 1,
+    feb: 2,
+    mar: 3,
+    apr: 4,
+    may: 5,
+    jun: 6,
+    jul: 7,
+    aug: 8,
+    sep: 9,
+    oct: 10,
+    nov: 11,
+    dec: 12,
+  };
+  const en = text.match(/^(\d{1,2})-([A-Za-z]{3})/);
+  if (en && months[en[2].toLowerCase()]) {
+    return isoDate(year, months[en[2].toLowerCase()], Number(en[1]));
+  }
+  const cn = text.match(/(\d{1,2})\s*月\s*(\d{1,2})/);
+  if (cn) return isoDate(year, Number(cn[1]), Number(cn[2]));
+  return "";
+}
+
+function findArrangeCols(rows, headerRow, year) {
+  const map = {};
+  const scan = [headerRow, headerRow - 1, headerRow + 1].filter((r) => r >= 0);
+  scan.forEach((r) => {
+    (rows[r] || []).forEach((cell, c) => {
+      const date = parseArrangeDate(cell, year);
+      if (date) map[date] = c;
+    });
+  });
+  return map;
+}
+
+function sheetToRows(sheet) {
+  return window.XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: "", blankrows: false });
+}
+
+function parseShiftRows(rows) {
+  const { year, month } = findYearMonth(rows);
+  const dayHeader = findDayHeader(rows);
+  const namePos = findNameCol(rows);
+  if (!dayHeader || !namePos) return null;
+  const arrangeCols = findArrangeCols(rows, namePos.row, year);
+  const byName = {};
+  for (let r = namePos.row + 1; r < rows.length; r += 1) {
+    const row = rows[r] || [];
+    const name = cellText(row[namePos.col]);
+    if (!isPersonName(name)) continue;
+    const records = [];
+    dayHeader.days.forEach(({ day, col }) => {
+      const shift = normalizeShift(row[col]);
+      if (!shift) return;
+      const date = isoDate(year, month, day);
+      const site = arrangeCols[date] != null ? cellText(row[arrangeCols[date]]) : "";
+      records.push({ date, shift, site, notes: "" });
+    });
+    if (!records.length) continue;
+    if (!byName[name]) byName[name] = [];
+    const seen = new Set(byName[name].map((item) => item.date));
+    records.forEach((item) => {
+      if (seen.has(item.date)) return;
+      seen.add(item.date);
+      byName[name].push(item);
+    });
+  }
+  const names = Object.keys(byName);
+  if (!names.length) return null;
+  return {
+    year,
+    month,
+    period: `${year}年${month}月`,
+    names,
+    byName,
+  };
+}
+
+function parseShiftWorkbook(workbook) {
+  let parsed = null;
+  workbook.SheetNames.some((name) => {
+    const rows = sheetToRows(workbook.Sheets[name]);
+    parsed = parseShiftRows(rows);
+    return Boolean(parsed);
+  });
+  return parsed;
+}
+
+function pickShiftName(names) {
+  const remembered = localStorage.getItem(SHIFT_NAME_KEY);
+  return names.find((name) => name.includes("旭")) || (names.includes(remembered) ? remembered : names[0]);
+}
+
+function mergeShifts(records) {
+  records.forEach((record) => {
+    const existing = state.shifts.find((item) => item.date === record.date);
+    if (existing) {
+      existing.shift = record.shift;
+      if (record.site) existing.site = record.site;
+    } else {
+      state.shifts.unshift({ id: uid(), date: record.date, site: record.site, shift: record.shift, notes: record.notes });
+    }
+  });
+  save();
+}
+
+async function handleShiftFile(file) {
+  try {
+    await loadXlsx();
+    const workbook = window.XLSX.read(new Uint8Array(await file.arrayBuffer()), { type: "array", cellDates: true });
+    const parsed = parseShiftWorkbook(workbook);
+    if (!parsed) {
+      alert("没有识别到姓名和日期格。请确认是 SPL 月度排班表。");
+      return;
+    }
+    shiftImport = { ...parsed, selected: pickShiftName(parsed.names) };
+    render();
+  } catch {
+    alert("排班表无法读取。");
+  }
+}
+
+function shiftImportHtml() {
+  if (!shiftImport) return "";
+  const records = shiftImport.byName[shiftImport.selected] || [];
+  const preview = records
+    .slice(0, 10)
+    .map((item) => `<div>${fmtDate(item.date)}：<b>${esc(item.shift)}</b>${item.site ? ` · ${esc(item.site)}` : ""}</div>`)
+    .join("");
+  return `
+    <div class="sheet">
+      <form data-shift-import>
+        <div class="toolbar"><h2>导入排班表</h2><button type="button" class="ghost" data-close>关闭</button></div>
+        <p class="meta">${esc(shiftImport.period)} · 识别到 ${shiftImport.names.length} 人</p>
+        <label>导入谁的排班
+          <select name="person">${shiftImport.names
+            .map((name) => `<option value="${esc(name)}" ${name === shiftImport.selected ? "selected" : ""}>${esc(name)}</option>`)
+            .join("")}</select>
+        </label>
+        <p class="meta">将写入 ${records.length} 天，同一天已有记录会被更新。</p>
+        <div class="peek">${preview || "<div>这一行没有班次。</div>"}${
+          records.length > 10 ? `<div>……还有 ${records.length - 10} 天</div>` : ""
+        }</div>
+        <div class="actions"><button class="primary" type="submit">导入</button></div>
+      </form>
+    </div>
+  `;
+}
+
 function todayReminders() {
   const weekday = new Date().getDay();
   return state.reminders
@@ -85,6 +329,7 @@ function openSheet(title, fields, onSubmit, extra = "") {
 
 function closeSheet() {
   sheet = null;
+  shiftImport = null;
   render();
 }
 
@@ -219,10 +464,10 @@ function renderWork(tab = "shifts") {
   const maps = {
     shifts: {
       addLabel: "加排班",
-      emptyText: "还没有排班。先记下今天去哪家、上什么班。",
+      emptyText: "还没有排班。可以手动添加，或导入公司的 xlsm 排班表。",
       items: [...state.shifts].sort(byDateDesc).map((item) => ({
         ...item,
-        title: `${item.site || "未填地点"} · ${item.shift}`,
+        title: `${item.shift}${item.site ? ` · ${item.site}` : ""}`,
         meta: fmtDate(item.date),
       })),
       href: (item) => `/work/shifts/${item.id}`,
@@ -256,6 +501,11 @@ function renderWork(tab = "shifts") {
       .join("")}</div>
     <div class="toolbar"><span class="meta">${current.items.length} 条</span></div>
     <button class="primary block" data-add="${tab}">${current.addLabel}</button>
+    ${
+      tab === "shifts"
+        ? `<button class="secondary block" data-import-shifts>导入排班表</button><input id="shift-file" type="file" accept=".xlsx,.xlsm,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" hidden />`
+        : ""
+    }
     <div class="list">${
       current.items.length ? current.items.map((item) => itemCard(current.href(item), item.title, item.meta)).join("") : empty(current.emptyText)
     }</div>
@@ -378,7 +628,7 @@ function shiftFields(item = {}) {
   return [
     { name: "date", label: "日期", type: "date", value: item.date || today() },
     { name: "site", label: "地点 / 客户", value: item.site },
-    { name: "shift", label: "班次", type: "select", value: item.shift || "白班", options: ["白班", "夜班", "早班", "中班", "休息", "加班"] },
+    { name: "shift", label: "班次", value: item.shift || "白班", placeholder: "MM / N4 / 白班 / 休息" },
     { name: "notes", label: "备注", type: "textarea", value: item.notes },
   ];
 }
@@ -543,7 +793,7 @@ function render() {
     detail = renderDetail();
     page = detail.html;
   }
-  root.innerHTML = page + sheetHtml();
+  root.innerHTML = page + sheetHtml() + shiftImportHtml();
   root.dataset.detailKind = detail?.kind || "";
   root.dataset.detailId = detail?.item?.id || "";
   root.dataset.detailBack = detail?.back || "";
@@ -558,6 +808,7 @@ document.addEventListener("click", (event) => {
   const back = event.target.closest("[data-back]");
   const exp = event.target.closest("[data-export]");
   const imp = event.target.closest("[data-import]");
+  const impShifts = event.target.closest("[data-import-shifts]");
   if (event.target.classList.contains("sheet")) closeSheet();
   if (add) startAdd(add.getAttribute("data-add") || "astro");
   if (tab) {
@@ -590,9 +841,21 @@ document.addEventListener("click", (event) => {
     URL.revokeObjectURL(url);
   }
   if (imp) document.getElementById("import-file")?.click();
+  if (impShifts) document.getElementById("shift-file")?.click();
 });
 
 document.addEventListener("change", (event) => {
+  if (shiftImport && event.target.name === "person") {
+    shiftImport.selected = event.target.value;
+    render();
+    return;
+  }
+  if (event.target.id === "shift-file" && event.target.files?.[0]) {
+    const file = event.target.files[0];
+    event.target.value = "";
+    handleShiftFile(file);
+    return;
+  }
   if (event.target.id !== "import-file" || !event.target.files?.[0]) return;
   const file = event.target.files[0];
   const reader = new FileReader();
@@ -611,8 +874,17 @@ document.addEventListener("change", (event) => {
 
 document.addEventListener("submit", (event) => {
   const form = event.target.closest(".sheet form");
-  if (!form || !sheet) return;
+  if (!form) return;
   event.preventDefault();
+  if (form.hasAttribute("data-shift-import") && shiftImport) {
+    const records = shiftImport.byName[shiftImport.selected] || [];
+    localStorage.setItem(SHIFT_NAME_KEY, shiftImport.selected);
+    mergeShifts(records);
+    closeSheet();
+    go("/work/shifts");
+    return;
+  }
+  if (!sheet) return;
   sheet.onSubmit(formFrom(form));
 });
 
