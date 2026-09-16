@@ -73,7 +73,7 @@ function todayShift() {
 let shiftImport = null;
 let calendarCursor = today().slice(0, 7);
 const SHIFT_NAME_KEY = "personal-hub-shift-name";
-const XLSX_SRC = "https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.mini.min.js";
+const XLSX_SRC = "https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js";
 const MONTH_EN = {
   jan: 1,
   january: 1,
@@ -168,34 +168,59 @@ function monthFromText(text) {
   return 0;
 }
 
+function parseHeaderDay(value) {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return { day: value.getDate(), month: value.getMonth() + 1, year: value.getFullYear() };
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    if (Number.isInteger(value) && value >= 1 && value <= 31) return { day: value };
+    if (value > 31 && value < 80000) {
+      const date = new Date(Math.round((value - 25569) * 86400 * 1000));
+      if (!Number.isNaN(date.getTime()) && date.getFullYear() > 1990) {
+        return { day: date.getDate(), month: date.getMonth() + 1, year: date.getFullYear() };
+      }
+    }
+  }
+  const text = cellText(value);
+  if (/^\d{1,2}$/.test(text)) {
+    const day = Number(text);
+    if (day >= 1 && day <= 31) return { day };
+  }
+  const en = text.match(/^(\d{1,2})-([A-Za-z]{3})/);
+  if (en && MONTH_EN[en[2].toLowerCase()]) {
+    return { day: Number(en[1]), month: MONTH_EN[en[2].toLowerCase()] };
+  }
+  const iso = text.match(/(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})/);
+  if (iso) return { year: Number(iso[1]), month: Number(iso[2]), day: Number(iso[3]) };
+  const cn = text.match(/(\d{1,2})\s*月\s*(\d{1,2})/);
+  if (cn) return { month: Number(cn[1]), day: Number(cn[2]) };
+  return null;
+}
+
 function monthFromSheetName(name) {
   const raw = String(name || "").trim();
-  const exact = raw.match(/^(?:20\d{2}\s*[-_.]?\s*)?(\d{1,2})\s*月?$/);
-  if (exact && !/^sheet\s*\d+$/i.test(raw)) {
+  if (/^sheet\s*\d+$/i.test(raw)) return 0;
+  const yearMonth = raw.match(/(20\d{2})?\s*[-_.年]?\s*(\d{1,2})\s*月/);
+  if (yearMonth) {
+    const month = Number(yearMonth[2]);
+    if (month >= 1 && month <= 12) return month;
+  }
+  const exact = raw.match(/^(\d{1,2})$/);
+  if (exact) {
     const month = Number(exact[1]);
-    if (month >= 1 && month <= 12 && !/^sheet/i.test(raw)) return month;
+    if (month >= 1 && month <= 12) return month;
   }
   return monthFromText(raw);
 }
 
-function findYearMonth(rows, sheetName, yearHint) {
-  const blob = [sheetName, ...rows.slice(0, 8).flat().map(cellText)].join(" ");
-  const year = yearFromText(blob) || yearHint || new Date().getFullYear();
-  const month = monthFromSheetName(sheetName) || monthFromText(blob) || 1;
-  return { year, month };
-}
-
 function findDayHeader(rows) {
   let best = null;
-  const limit = Math.min(rows.length, 20);
+  const limit = Math.min(rows.length, 80);
   for (let r = 0; r < limit; r += 1) {
     const days = [];
     (rows[r] || []).forEach((cell, c) => {
-      const text = cellText(cell);
-      if (/^\d{1,2}$/.test(text)) {
-        const day = Number(text);
-        if (day >= 1 && day <= 31) days.push({ day, col: c });
-      }
+      const parsed = parseHeaderDay(cell);
+      if (parsed) days.push({ ...parsed, col: c });
     });
     const unique = [];
     const seen = new Set();
@@ -211,25 +236,44 @@ function findDayHeader(rows) {
   return best;
 }
 
+function monthYearFromDays(days) {
+  const months = {};
+  const years = {};
+  days.forEach((item) => {
+    if (item.month) months[item.month] = (months[item.month] || 0) + 1;
+    if (item.year) years[item.year] = (years[item.year] || 0) + 1;
+  });
+  const pick = (map) => {
+    const keys = Object.keys(map);
+    if (!keys.length) return 0;
+    return Number(keys.sort((a, b) => map[b] - map[a])[0]);
+  };
+  return { month: pick(months), year: pick(years) };
+}
+
 function findNameCol(rows) {
-  for (let r = 0; r < Math.min(rows.length, 25); r += 1) {
+  for (let r = 0; r < Math.min(rows.length, 80); r += 1) {
     const cols = rows[r] || [];
     for (let c = 0; c < cols.length; c += 1) {
-      if (cellText(cols[c]) === "姓名") return { row: r, col: c };
+      if (cellText(cols[c]).includes("姓名")) return { row: r, col: c };
     }
   }
   return null;
 }
 
 function sheetToRows(sheet) {
-  return window.XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: "", blankrows: false });
+  return window.XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true, defval: "", blankrows: true });
 }
 
-function parseShiftRows(rows, sheetName, yearHint) {
-  const { year, month } = findYearMonth(rows, sheetName, yearHint);
+function parseShiftRows(rows, sheetName, yearHint, monthHint) {
   const dayHeader = findDayHeader(rows);
   const namePos = findNameCol(rows);
   if (!dayHeader || !namePos) return null;
+  const dated = monthYearFromDays(dayHeader.days);
+  const blob = [sheetName, ...rows.slice(0, 5).flat().map(cellText)].join(" ");
+  const year = dated.year || yearFromText(blob) || yearHint || new Date().getFullYear();
+  const month = dated.month || monthFromSheetName(sheetName) || monthHint || monthFromText(blob);
+  if (!month) return null;
   const byName = {};
   for (let r = namePos.row + 1; r < rows.length; r += 1) {
     const row = rows[r] || [];
@@ -256,30 +300,54 @@ function parseShiftRows(rows, sheetName, yearHint) {
 }
 
 function parseShiftWorkbook(workbook) {
+  const candidates = workbook.SheetNames.map((sheetName) => {
+    const rows = sheetToRows(workbook.Sheets[sheetName] || {});
+    return {
+      sheetName,
+      rows,
+      dayHeader: findDayHeader(rows),
+      namePos: findNameCol(rows),
+    };
+  });
+  const calendars = candidates.filter((item) => item.dayHeader && item.namePos);
+  const skipped = candidates
+    .filter((item) => !item.dayHeader || !item.namePos)
+    .map((item) => item.sheetName);
   const byName = {};
   const periods = [];
   let yearHint = 0;
-  workbook.SheetNames.forEach((sheetName) => {
-    const parsed = parseShiftRows(sheetToRows(workbook.Sheets[sheetName]), sheetName, yearHint);
-    if (!parsed) return;
+  calendars.forEach((item, index) => {
+    const monthHint = calendars.length >= 10 ? index + 1 : 0;
+    const parsed = parseShiftRows(item.rows, item.sheetName, yearHint, monthHint);
+    if (!parsed) {
+      skipped.push(item.sheetName);
+      return;
+    }
     yearHint = parsed.year;
-    periods.push(parsed.period);
+    if (!periods.includes(parsed.period)) periods.push(parsed.period);
     parsed.names.forEach((name) => {
       if (!byName[name]) byName[name] = [];
-      const seen = new Set(byName[name].map((item) => item.date));
-      parsed.byName[name].forEach((item) => {
-        if (seen.has(item.date)) return;
-        seen.add(item.date);
-        byName[name].push(item);
+      const seen = new Set(byName[name].map((row) => row.date));
+      parsed.byName[name].forEach((row) => {
+        if (seen.has(row.date)) {
+          const current = byName[name].find((entry) => entry.date === row.date);
+          if (current) current.shift = row.shift;
+          return;
+        }
+        seen.add(row.date);
+        byName[name].push(row);
       });
     });
   });
+  periods.sort();
   const names = Object.keys(byName);
   if (!names.length) return null;
   names.forEach((name) => byName[name].sort((a, b) => a.date.localeCompare(b.date)));
   return {
     periods,
-    period: periods.length > 1 ? `${periods[0]}–${periods[periods.length - 1]} · ${periods.length} 个月` : periods[0] || "",
+    skipped,
+    period:
+      periods.length > 1 ? `${periods[0]}–${periods[periods.length - 1]} · ${periods.length} 个月` : periods[0] || "",
     names,
     byName,
   };
@@ -353,7 +421,11 @@ function renderCalendar(ym) {
 async function handleShiftFile(file) {
   try {
     await loadXlsx();
-    const workbook = window.XLSX.read(new Uint8Array(await file.arrayBuffer()), { type: "array", cellDates: true });
+    const workbook = window.XLSX.read(new Uint8Array(await file.arrayBuffer()), {
+      type: "array",
+      cellDates: true,
+      dense: false,
+    });
     const parsed = parseShiftWorkbook(workbook);
     if (!parsed) {
       alert("没有识别到姓名和日期格。请确认是 SPL 月度排班表。");
@@ -379,6 +451,16 @@ function shiftImportHtml() {
       <form data-shift-import>
         <div class="toolbar"><h2>导入排班表</h2><button type="button" class="ghost" data-close>关闭</button></div>
         <p class="meta">${esc(shiftImport.period)} · ${shiftImport.names.length} 人</p>
+        ${
+          shiftImport.periods?.length
+            ? `<p class="meta">已识别月份：${esc(shiftImport.periods.join("、"))}</p>`
+            : ""
+        }
+        ${
+          shiftImport.skipped?.length
+            ? `<p class="meta">未读入子表：${esc(shiftImport.skipped.join("、"))}</p>`
+            : ""
+        }
         <label>导入谁的排班
           <select name="person">${shiftImport.names
             .map((name) => `<option value="${esc(name)}" ${name === shiftImport.selected ? "selected" : ""}>${esc(name)}</option>`)
