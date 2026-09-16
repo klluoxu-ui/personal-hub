@@ -71,8 +71,36 @@ function todayShift() {
 }
 
 let shiftImport = null;
+let calendarCursor = today().slice(0, 7);
 const SHIFT_NAME_KEY = "personal-hub-shift-name";
 const XLSX_SRC = "https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.mini.min.js";
+const MONTH_EN = {
+  jan: 1,
+  january: 1,
+  feb: 2,
+  february: 2,
+  mar: 3,
+  march: 3,
+  apr: 4,
+  april: 4,
+  may: 5,
+  jun: 6,
+  june: 6,
+  jul: 7,
+  july: 7,
+  aug: 8,
+  august: 8,
+  sep: 9,
+  sept: 9,
+  september: 9,
+  oct: 10,
+  october: 10,
+  nov: 11,
+  november: 11,
+  dec: 12,
+  december: 12,
+};
+const MONTH_CN = { 正: 1, 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10, 十一: 11, 十二: 12 };
 
 function pad2(value) {
   return String(value).padStart(2, "0");
@@ -80,6 +108,10 @@ function pad2(value) {
 
 function isoDate(year, month, day) {
   return `${year}-${pad2(month)}-${pad2(day)}`;
+}
+
+function isRest(shift) {
+  return shift === "休息";
 }
 
 function loadXlsx() {
@@ -117,14 +149,40 @@ function normalizeShift(raw) {
   return value;
 }
 
-function findYearMonth(rows) {
-  const blob = rows.slice(0, 8).flat().map(cellText).join(" ");
-  const yearMatch = blob.match(/(20\d{2})/);
-  const monthMatch = blob.match(/(\d{1,2})\s*月/);
-  return {
-    year: yearMatch ? Number(yearMatch[1]) : new Date().getFullYear(),
-    month: monthMatch ? Number(monthMatch[1]) : new Date().getMonth() + 1,
-  };
+function yearFromText(text) {
+  const match = String(text || "").match(/(20\d{2})/);
+  return match ? Number(match[1]) : 0;
+}
+
+function monthFromText(text) {
+  const raw = String(text || "").trim();
+  const cnNum = raw.match(/(?:^|[^\d])(\d{1,2})\s*月/);
+  if (cnNum) {
+    const month = Number(cnNum[1]);
+    if (month >= 1 && month <= 12) return month;
+  }
+  const cnWord = raw.match(/(正|十一|十二|一|二|三|四|五|六|七|八|九|十)\s*月/);
+  if (cnWord && MONTH_CN[cnWord[1]]) return MONTH_CN[cnWord[1]];
+  const en = raw.toLowerCase().match(/\b(january|february|march|april|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sept|sep|oct|nov|dec)\b/);
+  if (en && MONTH_EN[en[1]]) return MONTH_EN[en[1]];
+  return 0;
+}
+
+function monthFromSheetName(name) {
+  const raw = String(name || "").trim();
+  const exact = raw.match(/^(?:20\d{2}\s*[-_.]?\s*)?(\d{1,2})\s*月?$/);
+  if (exact && !/^sheet\s*\d+$/i.test(raw)) {
+    const month = Number(exact[1]);
+    if (month >= 1 && month <= 12 && !/^sheet/i.test(raw)) return month;
+  }
+  return monthFromText(raw);
+}
+
+function findYearMonth(rows, sheetName, yearHint) {
+  const blob = [sheetName, ...rows.slice(0, 8).flat().map(cellText)].join(" ");
+  const year = yearFromText(blob) || yearHint || new Date().getFullYear();
+  const month = monthFromSheetName(sheetName) || monthFromText(blob) || 1;
+  return { year, month };
 }
 
 function findDayHeader(rows) {
@@ -163,53 +221,15 @@ function findNameCol(rows) {
   return null;
 }
 
-function parseArrangeDate(value, year) {
-  const text = cellText(value);
-  const months = {
-    jan: 1,
-    feb: 2,
-    mar: 3,
-    apr: 4,
-    may: 5,
-    jun: 6,
-    jul: 7,
-    aug: 8,
-    sep: 9,
-    oct: 10,
-    nov: 11,
-    dec: 12,
-  };
-  const en = text.match(/^(\d{1,2})-([A-Za-z]{3})/);
-  if (en && months[en[2].toLowerCase()]) {
-    return isoDate(year, months[en[2].toLowerCase()], Number(en[1]));
-  }
-  const cn = text.match(/(\d{1,2})\s*月\s*(\d{1,2})/);
-  if (cn) return isoDate(year, Number(cn[1]), Number(cn[2]));
-  return "";
-}
-
-function findArrangeCols(rows, headerRow, year) {
-  const map = {};
-  const scan = [headerRow, headerRow - 1, headerRow + 1].filter((r) => r >= 0);
-  scan.forEach((r) => {
-    (rows[r] || []).forEach((cell, c) => {
-      const date = parseArrangeDate(cell, year);
-      if (date) map[date] = c;
-    });
-  });
-  return map;
-}
-
 function sheetToRows(sheet) {
   return window.XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: "", blankrows: false });
 }
 
-function parseShiftRows(rows) {
-  const { year, month } = findYearMonth(rows);
+function parseShiftRows(rows, sheetName, yearHint) {
+  const { year, month } = findYearMonth(rows, sheetName, yearHint);
   const dayHeader = findDayHeader(rows);
   const namePos = findNameCol(rows);
   if (!dayHeader || !namePos) return null;
-  const arrangeCols = findArrangeCols(rows, namePos.row, year);
   const byName = {};
   for (let r = namePos.row + 1; r < rows.length; r += 1) {
     const row = rows[r] || [];
@@ -219,9 +239,7 @@ function parseShiftRows(rows) {
     dayHeader.days.forEach(({ day, col }) => {
       const shift = normalizeShift(row[col]);
       if (!shift) return;
-      const date = isoDate(year, month, day);
-      const site = arrangeCols[date] != null ? cellText(row[arrangeCols[date]]) : "";
-      records.push({ date, shift, site, notes: "" });
+      records.push({ date: isoDate(year, month, day), shift, site: "", notes: "" });
     });
     if (!records.length) continue;
     if (!byName[name]) byName[name] = [];
@@ -234,23 +252,37 @@ function parseShiftRows(rows) {
   }
   const names = Object.keys(byName);
   if (!names.length) return null;
-  return {
-    year,
-    month,
-    period: `${year}年${month}月`,
-    names,
-    byName,
-  };
+  return { year, month, period: `${year}年${month}月`, names, byName };
 }
 
 function parseShiftWorkbook(workbook) {
-  let parsed = null;
-  workbook.SheetNames.some((name) => {
-    const rows = sheetToRows(workbook.Sheets[name]);
-    parsed = parseShiftRows(rows);
-    return Boolean(parsed);
+  const byName = {};
+  const periods = [];
+  let yearHint = 0;
+  workbook.SheetNames.forEach((sheetName) => {
+    const parsed = parseShiftRows(sheetToRows(workbook.Sheets[sheetName]), sheetName, yearHint);
+    if (!parsed) return;
+    yearHint = parsed.year;
+    periods.push(parsed.period);
+    parsed.names.forEach((name) => {
+      if (!byName[name]) byName[name] = [];
+      const seen = new Set(byName[name].map((item) => item.date));
+      parsed.byName[name].forEach((item) => {
+        if (seen.has(item.date)) return;
+        seen.add(item.date);
+        byName[name].push(item);
+      });
+    });
   });
-  return parsed;
+  const names = Object.keys(byName);
+  if (!names.length) return null;
+  names.forEach((name) => byName[name].sort((a, b) => a.date.localeCompare(b.date)));
+  return {
+    periods,
+    period: periods.length > 1 ? `${periods[0]}–${periods[periods.length - 1]} · ${periods.length} 个月` : periods[0] || "",
+    names,
+    byName,
+  };
 }
 
 function pickShiftName(names) {
@@ -263,12 +295,59 @@ function mergeShifts(records) {
     const existing = state.shifts.find((item) => item.date === record.date);
     if (existing) {
       existing.shift = record.shift;
-      if (record.site) existing.site = record.site;
     } else {
-      state.shifts.unshift({ id: uid(), date: record.date, site: record.site, shift: record.shift, notes: record.notes });
+      state.shifts.unshift({ id: uid(), date: record.date, site: "", shift: record.shift, notes: "" });
     }
   });
   save();
+}
+
+function moveCalendar(delta) {
+  if (delta === "today") {
+    calendarCursor = today().slice(0, 7);
+    return;
+  }
+  const [year, month] = calendarCursor.split("-").map(Number);
+  const date = new Date(year, month - 1 + Number(delta), 1);
+  calendarCursor = `${date.getFullYear()}-${pad2(date.getMonth() + 1)}`;
+}
+
+function renderCalendar(ym) {
+  const [year, month] = ym.split("-").map(Number);
+  const firstWeekday = new Date(year, month - 1, 1).getDay();
+  const daysInMonth = new Date(year, month, 0).getDate();
+  const cells = [];
+  for (let i = 0; i < firstWeekday; i += 1) cells.push(`<div class="cal-cell pad"></div>`);
+  for (let day = 1; day <= daysInMonth; day += 1) {
+    const date = isoDate(year, month, day);
+    const rec = state.shifts.find((item) => item.date === date);
+    const todayCls = date === today() ? " today" : "";
+    if (!rec) {
+      cells.push(`<div class="cal-cell${todayCls}"><span class="cal-num">${day}</span></div>`);
+      continue;
+    }
+    const rest = isRest(rec.shift);
+    const tag = rest ? "休" : "班";
+    const code = rest ? "" : `<span class="cal-code">${esc(rec.shift)}</span>`;
+    cells.push(
+      `<a class="cal-cell${todayCls}${rest ? " rest" : " work"}" href="#/work/shifts/${rec.id}"><span class="cal-num">${day}</span><span class="cal-tag">${tag}</span>${code}</a>`
+    );
+  }
+  return `
+    <div class="cal">
+      <div class="cal-head">
+        <button class="ghost cal-nav" data-cal="-1" type="button">‹</button>
+        <div class="cal-title">
+          <p class="eyebrow">${year}年</p>
+          <h1>${month}月</h1>
+        </div>
+        <button class="ghost cal-nav" data-cal="1" type="button">›</button>
+      </div>
+      <button class="ghost cal-today" data-cal="today" type="button">今天</button>
+      <div class="cal-week">${DAYS.map((day) => `<span>${day}</span>`).join("")}</div>
+      <div class="cal-grid">${cells.join("")}</div>
+    </div>
+  `;
 }
 
 async function handleShiftFile(file) {
@@ -290,23 +369,24 @@ async function handleShiftFile(file) {
 function shiftImportHtml() {
   if (!shiftImport) return "";
   const records = shiftImport.byName[shiftImport.selected] || [];
+  const workDays = records.filter((item) => !isRest(item.shift)).length;
   const preview = records
-    .slice(0, 10)
-    .map((item) => `<div>${fmtDate(item.date)}：<b>${esc(item.shift)}</b>${item.site ? ` · ${esc(item.site)}` : ""}</div>`)
+    .slice(0, 8)
+    .map((item) => `<div>${fmtDate(item.date)}：<b>${esc(isRest(item.shift) ? "休" : item.shift)}</b></div>`)
     .join("");
   return `
     <div class="sheet">
       <form data-shift-import>
         <div class="toolbar"><h2>导入排班表</h2><button type="button" class="ghost" data-close>关闭</button></div>
-        <p class="meta">${esc(shiftImport.period)} · 识别到 ${shiftImport.names.length} 人</p>
+        <p class="meta">${esc(shiftImport.period)} · ${shiftImport.names.length} 人</p>
         <label>导入谁的排班
           <select name="person">${shiftImport.names
             .map((name) => `<option value="${esc(name)}" ${name === shiftImport.selected ? "selected" : ""}>${esc(name)}</option>`)
             .join("")}</select>
         </label>
-        <p class="meta">将写入 ${records.length} 天，同一天已有记录会被更新。</p>
+        <p class="meta">${records.length} 天里有 ${workDays} 天要上班，休息不显示班次代码。</p>
         <div class="peek">${preview || "<div>这一行没有班次。</div>"}${
-          records.length > 10 ? `<div>……还有 ${records.length - 10} 天</div>` : ""
+          records.length > 8 ? `<div>……还有 ${records.length - 8} 天</div>` : ""
         }</div>
         <div class="actions"><button class="primary" type="submit">导入</button></div>
       </form>
@@ -404,14 +484,18 @@ function remove(listName, id) {
 function renderHome() {
   const shift = todayShift();
   const reminders = todayReminders();
+  const shiftLine = !shift
+    ? "<div>今天还没有排班。</div>"
+    : isRest(shift.shift)
+      ? "<div>今天休息。</div>"
+      : `<div>今天上班：<b>${esc(shift.shift)}</b></div>`;
   return `
     <header class="top">
       <div>
         <p class="eyebrow">${new Date().toLocaleDateString("zh-CN", { weekday: "long", month: "long", day: "numeric" })}</p>
         <h1>旭的工作台</h1>
       </div>
-    </header>
-    <div class="top-actions">
+      <div class="top-actions">
         <button class="ghost" data-import>导入</button>
         <button class="ghost" data-export>导出</button>
         <input id="import-file" type="file" accept="application/json" hidden />
@@ -419,14 +503,14 @@ function renderHome() {
     </header>
     <div class="grid">
       <a class="tile" href="#/astro"><i class="dot astro"></i><strong>天文摄影</strong><span>${state.astro.length} 条拍摄记录</span></a>
-      <a class="tile" href="#/work"><i class="dot work"></i><strong>排班备忘</strong><span>${state.shifts.length} 个班次 · ${state.memos.length} 条现场</span></a>
+      <a class="tile" href="#/work"><i class="dot work"></i><strong>排班日历</strong><span>${state.shifts.filter((item) => !isRest(item.shift) && item.date.startsWith(today().slice(0, 7))).length} 天本月要上班</span></a>
       <a class="tile" href="#/games"><i class="dot games"></i><strong>游戏进度</strong><span>僵尸地图 ${state.zomboid.length} · 手游 ${state.games.length}</span></a>
       <a class="tile" href="#/fitness"><i class="dot fit"></i><strong>健身提醒</strong><span>${reminders.length} 项今天要做</span></a>
     </div>
     <section class="card panel">
       <h2>今天</h2>
       <div class="peek">
-        ${shift ? `<div>班次：<b>${esc(shift.site || "未填地点")} · ${esc(shift.shift)}</b></div>` : "<div>今天还没有排班。</div>"}
+        ${shiftLine}
         ${
           reminders.length
             ? reminders.map((item) => `<div>健身：<b>${esc(item.time)} ${esc(item.title)}</b></div>`).join("")
@@ -467,7 +551,7 @@ function renderWork(tab = "shifts") {
       emptyText: "还没有排班。可以手动添加，或导入公司的 xlsm 排班表。",
       items: [...state.shifts].sort(byDateDesc).map((item) => ({
         ...item,
-        title: `${item.shift}${item.site ? ` · ${item.site}` : ""}`,
+        title: isRest(item.shift) ? "休息" : item.shift,
         meta: fmtDate(item.date),
       })),
       href: (item) => `/work/shifts/${item.id}`,
@@ -494,18 +578,24 @@ function renderWork(tab = "shifts") {
     },
   };
   const current = maps[tab];
+  const tabsHtml = `<div class="tabs">${tabs
+    .map((item) => `<button data-tab="${item.key}" class="${item.key === tab ? "active" : ""}">${item.label}</button>`)
+    .join("")}</div>`;
+  if (tab === "shifts") {
+    return `
+    ${tabsHtml}
+    ${renderCalendar(calendarCursor)}
+    <button class="secondary block" data-import-shifts>导入排班表</button>
+    <input id="shift-file" type="file" accept=".xlsx,.xlsm,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" hidden />
+    <button class="ghost block" data-add="shifts">${current.addLabel}</button>
+    ${nav("work")}
+  `;
+  }
   return `
     <header class="top"><div><p class="eyebrow">工作记录</p><h1>排班备忘</h1></div></header>
-    <div class="tabs">${tabs
-      .map((item) => `<button data-tab="${item.key}" class="${item.key === tab ? "active" : ""}">${item.label}</button>`)
-      .join("")}</div>
+    ${tabsHtml}
     <div class="toolbar"><span class="meta">${current.items.length} 条</span></div>
     <button class="primary block" data-add="${tab}">${current.addLabel}</button>
-    ${
-      tab === "shifts"
-        ? `<button class="secondary block" data-import-shifts>导入排班表</button><input id="shift-file" type="file" accept=".xlsx,.xlsm,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" hidden />`
-        : ""
-    }
     <div class="list">${
       current.items.length ? current.items.map((item) => itemCard(current.href(item), item.title, item.meta)).join("") : empty(current.emptyText)
     }</div>
@@ -727,13 +817,12 @@ function renderDetail() {
   const kind = groups[a]?.[b];
   if (!kind || !c) return { html: renderHome() };
   const item = state[kind].find((x) => x.id === c);
-  const heading = item?.target || item?.title || item?.name || item?.map || "记录";
+  const heading = kind === "shifts" ? (isRest(item?.shift) ? "休息" : item?.shift) : item?.target || item?.title || item?.name || item?.map || "记录";
   const fieldMap = {
     shifts: [
       { label: "日期", value: fmtDate(item?.date) },
-      { label: "班次", value: item?.shift },
-      { label: "地点", value: item?.site },
-      { label: "备注", value: item?.notes },
+      { label: "班次", value: isRest(item?.shift) ? "休息" : item?.shift },
+      ...(item?.notes ? [{ label: "备注", value: item.notes }] : []),
     ],
     memos: [
       { label: "日期", value: fmtDate(item?.date) },
@@ -800,6 +889,7 @@ function render() {
 }
 
 document.addEventListener("click", (event) => {
+  const cal = event.target.closest("[data-cal]");
   const add = event.target.closest("[data-add]");
   const tab = event.target.closest("[data-tab]");
   const close = event.target.closest("[data-close]");
@@ -810,6 +900,11 @@ document.addEventListener("click", (event) => {
   const imp = event.target.closest("[data-import]");
   const impShifts = event.target.closest("[data-import-shifts]");
   if (event.target.classList.contains("sheet")) closeSheet();
+  if (cal) {
+    moveCalendar(cal.getAttribute("data-cal"));
+    render();
+    return;
+  }
   if (add) startAdd(add.getAttribute("data-add") || "astro");
   if (tab) {
     const key = tab.getAttribute("data-tab");
@@ -880,6 +975,8 @@ document.addEventListener("submit", (event) => {
     const records = shiftImport.byName[shiftImport.selected] || [];
     localStorage.setItem(SHIFT_NAME_KEY, shiftImport.selected);
     mergeShifts(records);
+    const focus = records.find((item) => item.date.startsWith(today().slice(0, 7))) || records[records.length - 1];
+    if (focus) calendarCursor = focus.date.slice(0, 7);
     closeSheet();
     go("/work/shifts");
     return;

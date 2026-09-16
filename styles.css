@@ -1,15 +1,17 @@
 :root {
-  --bg: #0c1017;
-  --bg-2: #121826;
-  --card: #181f2c;
-  --line: rgba(232, 238, 247, 0.08);
-  --text: #e8eef7;
-  --muted: #8b97ab;
-  --blue: #7eb8ff;
-  --amber: #e8b86d;
-  --green: #7dcea0;
-  --red: #ef8a8a;
-  --shadow: 0 18px 40px rgba(0, 0, 0, 0.28);
+  --bg: #f3f4f8;
+  --bg-2: #ffffff;
+  --card: #ffffff;
+  --line: #e6e8ee;
+  --text: #2c3038;
+  --muted: #7b8190;
+  --blue: #4d7ec8;
+  --amber: #c49a5a;
+  --green: #5a9e78;
+  --red: #d96b63;
+  --today: #e15b54;
+  --work: #4d7ec8;
+  --shadow: 0 8px 24px rgba(44, 48, 56, 0.06);
   --radius: 18px;
   --pad: 16px;
   --nav: 72px;
@@ -25,7 +27,7 @@ html,
 body {
   margin: 0;
   min-height: 100%;
-  background: radial-gradient(1200px 600px at 50% -10%, #1a2740 0%, var(--bg) 55%);
+  background: var(--bg);
   color: var(--text);
   font-family: "SF Pro Text", "PingFang SC", "Noto Sans SC", "Segoe UI", sans-serif;
   scrollbar-width: none;
@@ -73,7 +75,8 @@ button {
 }
 
 .primary.block,
-.secondary.block {
+.secondary.block,
+.ghost.block {
   width: 100%;
   margin-bottom: 12px;
 }
@@ -107,7 +110,7 @@ h1 {
 
 .card,
 .tile {
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 40%), var(--card);
+  background: var(--card);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
@@ -184,7 +187,7 @@ h1 {
 }
 
 .tabs button.active {
-  background: #243149;
+  background: #eceff5;
   color: var(--text);
 }
 
@@ -210,12 +213,13 @@ h1 {
 
 .primary {
   background: var(--blue);
-  color: #0c1017;
+  color: #fff;
   font-weight: 650;
 }
 
 .secondary {
-  background: #243149;
+  background: #eceff5;
+  color: var(--text);
 }
 
 .danger {
@@ -261,7 +265,7 @@ h1 {
   display: flex;
   gap: 0;
   padding: 8px 4px calc(8px + var(--safe-bottom));
-  background: rgba(12, 16, 23, 0.92);
+  background: rgba(255, 255, 255, 0.92);
   border-top: 1px solid var(--line);
   backdrop-filter: blur(16px);
   z-index: 10;
@@ -280,8 +284,8 @@ h1 {
 }
 
 .nav a.active {
-  color: var(--text);
-  background: rgba(126, 184, 255, 0.12);
+  color: var(--blue);
+  background: rgba(77, 126, 200, 0.12);
 }
 
 .sheet {
@@ -315,7 +319,7 @@ select,
 textarea {
   width: 100%;
   margin-top: 6px;
-  background: #0f1520;
+  background: #f6f7fb;
   border: 1px solid var(--line);
   border-radius: 12px;
   padding: 11px 12px;
@@ -374,4 +378,104 @@ textarea {
 
 .switch input {
   width: auto;
+}
+
+.cal {
+  margin: 4px 0 18px;
+}
+
+.cal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.cal-title {
+  text-align: center;
+}
+
+.cal-title h1 {
+  font-size: 34px;
+  font-weight: 700;
+  letter-spacing: -0.04em;
+}
+
+.cal-nav {
+  width: 40px;
+  height: 40px;
+  font-size: 22px;
+  line-height: 1;
+}
+
+.cal-today {
+  display: block;
+  margin: 0 auto 12px;
+}
+
+.cal-week,
+.cal-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+}
+
+.cal-week {
+  margin-bottom: 4px;
+}
+
+.cal-week span {
+  text-align: center;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 6px 0;
+}
+
+.cal-cell {
+  min-height: 68px;
+  padding: 6px 2px 8px;
+  text-align: center;
+  text-decoration: none;
+  color: var(--text);
+  border-radius: 12px;
+}
+
+.cal-cell.pad {
+  min-height: 0;
+}
+
+.cal-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  font-size: 16px;
+}
+
+.cal-cell.today .cal-num {
+  background: var(--today);
+  color: #fff;
+  border-radius: 50%;
+}
+
+.cal-tag {
+  display: block;
+  font-size: 11px;
+  line-height: 1.2;
+  margin-top: 2px;
+}
+
+.cal-cell.work .cal-tag {
+  color: var(--work);
+}
+
+.cal-cell.rest .cal-tag {
+  color: var(--muted);
+}
+
+.cal-code {
+  display: block;
+  font-size: 10px;
+  color: var(--muted);
+  margin-top: 1px;
 }
