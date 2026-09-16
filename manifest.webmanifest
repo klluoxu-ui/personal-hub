@@ -1,0 +1,19 @@
+{
+  "name": "旭的工作台",
+  "short_name": "工作台",
+  "description": "天文摄影、排班备忘、游戏进度、健身提醒",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0c1017",
+  "theme_color": "#0c1017",
+  "lang": "zh-CN",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
