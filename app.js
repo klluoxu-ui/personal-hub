@@ -164,9 +164,9 @@ function renderHome() {
       <div>
         <p class="eyebrow">${new Date().toLocaleDateString("zh-CN", { weekday: "long", month: "long", day: "numeric" })}</p>
         <h1>旭的工作台</h1>
+        <p class="lead">天文、排班、游戏、健身，一手掌握。</p>
       </div>
-    </header>
-    <div class="top-actions">
+      <div class="top-actions">
         <button class="ghost" data-import>导入</button>
         <button class="ghost" data-export>导出</button>
         <input id="import-file" type="file" accept="application/json" hidden />
@@ -176,16 +176,16 @@ function renderHome() {
       <a class="tile" href="#/astro"><i class="dot astro"></i><strong>天文摄影</strong><span>${state.astro.length} 条拍摄记录</span></a>
       <a class="tile" href="#/work"><i class="dot work"></i><strong>排班备忘</strong><span>${state.shifts.length} 个班次 · ${state.memos.length} 条现场</span></a>
       <a class="tile" href="#/games"><i class="dot games"></i><strong>游戏进度</strong><span>僵尸地图 ${state.zomboid.length} · 手游 ${state.games.length}</span></a>
-      <a class="tile" href="#/fitness"><i class="dot fit"></i><strong>健身提醒</strong><span>${reminders.length} 项今天要做</span></a>
+      <a class="tile" href="#/fitness"><i class="dot fit"></i><strong>健身</strong><span>${reminders.length} 项今日提醒</span></a>
     </div>
     <section class="card panel">
-      <h2>今天</h2>
+      <h2>今日安排</h2>
       <div class="peek">
-        ${shift ? `<div>班次：<b>${esc(shift.site || "未填地点")} · ${esc(shift.shift)}</b></div>` : "<div>今天还没有排班。</div>"}
+        ${shift ? `<div>班次：<b>${esc(shift.site || "未填地点")} · ${esc(shift.shift)}</b></div>` : "<div>今天暂无排班。</div>"}
         ${
           reminders.length
             ? reminders.map((item) => `<div>健身：<b>${esc(item.time)} ${esc(item.title)}</b></div>`).join("")
-            : "<div>今天没有开启的健身提醒。</div>"
+            : "<div>今天暂无健身提醒。</div>"
         }
       </div>
     </section>
