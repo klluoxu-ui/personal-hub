@@ -15,16 +15,21 @@
 
 **https://klluoxu-ui.github.io/personal-hub/**
 
-### 一次性开通（在 GitHub 网页操作）
+### 一次性开通（现在只用手机）
 
-1. 打开仓库 Settings → Pages  
-2. Build and deployment → Source 选 **GitHub Actions**  
-3. 若仓库是 **Private**：免费账号无法对外发布 Pages，需要任选其一  
-   - 把仓库改成 **Public**（页面代码公开，你的笔记数据仍只存在手机浏览器本地，不会上传到 GitHub）  
-   - 或开通 GitHub Pro  
-4. 合并带 Pages 工作流的 PR 到 `main`，或在 Actions 里手动跑 **Deploy GitHub Pages**  
-5. 等 Actions 变绿后，手机浏览器打开上面的地址  
-6. Safari / Chrome 可「添加到主屏幕」，当普通 App 用
+GitHub App 里没有仓库 Settings。请用 Safari / Chrome 打开网页，并切成**桌面版网站**。
+
+部署工作流已经合进 `main`。免费账号要对外发布 Pages，仓库必须是 **Public**（公开的是页面代码；排班/备忘仍只在你手机浏览器里）。
+
+1. 打开：https://github.com/klluoxu-ui/personal-hub/settings  
+2. 拉到最底部 **Danger Zone** → **Change repository visibility** → **Make public**  
+3. 按提示输入 `klluoxu-ui/personal-hub` 确认  
+4. 打开：https://github.com/klluoxu-ui/personal-hub/actions  
+5. 点 **Deploy GitHub Pages** → 最新一次运行右侧 **Re-run jobs**（或等下一次自动部署）  
+6. 变绿后打开：**https://klluoxu-ui.github.io/personal-hub/**  
+7. Safari / Chrome 可「添加到主屏幕」，当普通 App 用
+
+工作流会自动把 Pages 的 Source 设为 GitHub Actions，不用再进 Pages 设置。
 
 数据仍保存在当前浏览器；换手机或清缓存会丢，记得用首页的导出备份。
 
