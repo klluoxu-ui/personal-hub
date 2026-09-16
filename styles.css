@@ -69,7 +69,14 @@ button {
   display: flex;
   gap: 8px;
   align-items: center;
-  margin: -8px 0 16px;
+  flex-shrink: 0;
+}
+
+.lead {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.45;
 }
 
 .primary.block {
