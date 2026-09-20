@@ -1399,7 +1399,7 @@ function renderAstro() {
   const outings = candidates.filter((item) => item.kind === "outing");
   const busy = candidates.filter((item) => item.kind === "busy");
   const only = candidates.filter((item) => item.kind === "candidate");
-  const ranked = [...outings, ...busy, ...only];
+  const ranked = [...candidates].sort((a, b) => a.date.localeCompare(b.date));
   const hasShifts = state.shifts.length > 0;
   const loc = getAstroLocation();
   const listHtml = ranked.length
