@@ -464,6 +464,7 @@ function openMapPicker() {
     lat: loc?.lat ?? 26.57105,
     lon: loc?.lon ?? 107.97695,
     name: loc?.name || "凯里市 · 贵州黔东南",
+    allowConfirm: true,
   };
   render();
 }
@@ -589,6 +590,8 @@ function updateMapPickerMeta() {
   const el = document.querySelector("[data-map-meta]");
   if (!el || !mapPicker) return;
   el.textContent = `${mapPicker.lat.toFixed(4)}, ${mapPicker.lon.toFixed(4)} · ${mapPicker.name || "地图选点"}`;
+  const confirm = document.querySelector("[data-map-confirm]");
+  if (confirm) confirm.disabled = mapPicker.allowConfirm === false;
 }
 
 async function applyMapPoint(lat, lon, fallbackName, opts = {}) {
@@ -596,6 +599,7 @@ async function applyMapPoint(lat, lon, fallbackName, opts = {}) {
   mapPicker.lat = lat;
   mapPicker.lon = lon;
   mapPicker.name = fallbackName || "地图选点";
+  mapPicker.allowConfirm = opts.allowConfirm !== false;
   const acc = Number(opts.accuracy);
   if (Number.isFinite(acc) && acc > 0) setAccuracyCircle(lat, lon, acc);
   else clearAccuracyCircle();
@@ -641,7 +645,7 @@ async function mountAstroMap() {
   map.on("click", (event) => {
     stopGeoWatch();
     const wgs = gcj02ToWgs84(event.latlng.lat, event.latlng.lng);
-    applyMapPoint(wgs.lat, wgs.lon, "地图选点", { zoom: 16 });
+    applyMapPoint(wgs.lat, wgs.lon, "地图选点", { zoom: 16, allowConfirm: true });
     setMapStatus("已用你点的位置。");
   });
   astroMap = map;
@@ -660,7 +664,7 @@ function mapPickerHtml() {
         <p class="meta map-status" data-map-status>${esc(mapStatusText)}</p>
         <div class="actions">
           <button class="secondary" type="button" data-map-locate>定位到我</button>
-          <button class="primary" type="button" data-map-confirm>使用此点</button>
+          <button class="primary" type="button" data-map-confirm ${mapPicker.allowConfirm === false ? "disabled" : ""}>使用此点</button>
         </div>
       </div>
     </div>
@@ -686,6 +690,7 @@ function panMapToMe() {
       skipReverse: true,
       accuracy: acc,
       zoom: acc > 800 ? 12 : 14,
+      allowConfirm: false,
     });
     setMapStatus(`还在等 GPS（当前约 ${acc} 米）。若停在福田，不要点「使用此点」，请再点到实际位置。`);
   };
@@ -698,7 +703,7 @@ function panMapToMe() {
       pos.coords.latitude,
       pos.coords.longitude,
       precise ? "当前位置" : `当前位置（精度约 ${acc} 米）`,
-      { skipReverse: !precise, accuracy: acc, zoom: precise ? 16 : 14 }
+      { skipReverse: !precise, accuracy: acc, zoom: precise ? 16 : 14, allowConfirm: true }
     );
     if (precise) setMapStatus(`已定位，精度约 ${acc} 米。`);
     else setMapStatus(`定位仍偏粗（约 ${acc} 米），南山和福田可能分不清。请再点到你所在位置。`);
@@ -742,7 +747,7 @@ function panMapToMe() {
 }
 
 function confirmMapPicker() {
-  if (!mapPicker) return;
+  if (!mapPicker || mapPicker.allowConfirm === false) return;
   setAstroLocation({
     name: mapPicker.name || "地图选点",
     lat: mapPicker.lat,

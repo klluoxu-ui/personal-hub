@@ -217,6 +217,10 @@ h1 {
   font-weight: 650;
 }
 
+.primary:disabled {
+  opacity: 0.45;
+}
+
 .secondary {
   background: #eceff5;
   color: var(--text);
