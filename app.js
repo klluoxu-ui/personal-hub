@@ -114,6 +114,110 @@ function isRest(shift) {
   return shift === "休息";
 }
 
+const DARK_THRESHOLD_KEY = "personal-hub-dark-threshold";
+const DARK_HORIZON_DAYS = 60;
+const SYNODIC_MONTH = 29.530588853;
+/** Known new moon near J2000: 2000-01-06 18:14 UTC */
+const KNOWN_NEW_MOON_MS = Date.UTC(2000, 0, 6, 18, 14, 0);
+
+function getDarkThreshold() {
+  return localStorage.getItem(DARK_THRESHOLD_KEY) === "0.5" ? 0.5 : 0.3;
+}
+
+function setDarkThreshold(value) {
+  localStorage.setItem(DARK_THRESHOLD_KEY, value === 0.5 ? "0.5" : "0.3");
+}
+
+function parseIsoDate(iso) {
+  const [y, m, d] = iso.split("-").map(Number);
+  return new Date(y, m - 1, d);
+}
+
+function addDaysIso(iso, days) {
+  const date = parseIsoDate(iso);
+  date.setDate(date.getDate() + days);
+  return isoDate(date.getFullYear(), date.getMonth() + 1, date.getDate());
+}
+
+/** Moon age in days (0 = new moon) for a local calendar date at local noon. */
+function moonAgeDays(iso) {
+  const [y, m, d] = iso.split("-").map(Number);
+  const noonLocal = new Date(y, m - 1, d, 12, 0, 0);
+  let age = ((noonLocal.getTime() - KNOWN_NEW_MOON_MS) / 86400000) % SYNODIC_MONTH;
+  if (age < 0) age += SYNODIC_MONTH;
+  return age;
+}
+
+/** Illuminated fraction 0–1 (0 ≈ new, 1 ≈ full). */
+function moonIllumination(iso) {
+  const age = moonAgeDays(iso);
+  return (1 - Math.cos((2 * Math.PI * age) / SYNODIC_MONTH)) / 2;
+}
+
+function moonPhaseLabel(iso) {
+  const age = moonAgeDays(iso);
+  const phase = age / SYNODIC_MONTH;
+  if (phase < 0.03 || phase >= 0.97) return "新月";
+  if (phase < 0.22) return "蛾眉月";
+  if (phase < 0.28) return "上弦";
+  if (phase < 0.47) return "盈凸月";
+  if (phase < 0.53) return "满月";
+  if (phase < 0.72) return "亏凸月";
+  if (phase < 0.78) return "下弦";
+  return "残月";
+}
+
+function fmtIllum(illum) {
+  return `${Math.round(illum * 100)}%`;
+}
+
+function shiftForDate(iso) {
+  return state.shifts.find((item) => item.date === iso);
+}
+
+/**
+ * Classify a dark-sky night against the roster.
+ * kind: outing | busy | candidate
+ */
+function classifyDarkNight(iso, illum = moonIllumination(iso)) {
+  const rec = shiftForDate(iso);
+  let kind = "candidate";
+  if (rec) kind = isRest(rec.shift) ? "outing" : "busy";
+  return {
+    date: iso,
+    illumination: illum,
+    phase: moonPhaseLabel(iso),
+    kind,
+    shift: rec ? rec.shift : null,
+  };
+}
+
+function isDarkNight(iso, threshold = getDarkThreshold()) {
+  return moonIllumination(iso) <= threshold;
+}
+
+/** Dark nights from today through +horizon days, sorted by date. */
+function darkNightCandidates(horizon = DARK_HORIZON_DAYS, threshold = getDarkThreshold()) {
+  const start = today();
+  const list = [];
+  for (let i = 0; i <= horizon; i += 1) {
+    const date = addDaysIso(start, i);
+    const illum = moonIllumination(date);
+    if (illum <= threshold) list.push(classifyDarkNight(date, illum));
+  }
+  return list;
+}
+
+function outingNights(horizon = DARK_HORIZON_DAYS, threshold = getDarkThreshold()) {
+  return darkNightCandidates(horizon, threshold).filter((item) => item.kind === "outing");
+}
+
+function outingKindLabel(kind) {
+  if (kind === "outing") return "可出摊";
+  if (kind === "busy") return "暗夜但要上班";
+  return "暗夜候选";
+}
+
 function loadXlsx() {
   if (window.XLSX) return Promise.resolve();
   return new Promise((resolve, reject) => {
@@ -384,21 +488,28 @@ function renderCalendar(ym) {
   const [year, month] = ym.split("-").map(Number);
   const firstWeekday = new Date(year, month - 1, 1).getDay();
   const daysInMonth = new Date(year, month, 0).getDate();
+  const threshold = getDarkThreshold();
   const cells = [];
   for (let i = 0; i < firstWeekday; i += 1) cells.push(`<div class="cal-cell pad"></div>`);
   for (let day = 1; day <= daysInMonth; day += 1) {
     const date = isoDate(year, month, day);
     const rec = state.shifts.find((item) => item.date === date);
     const todayCls = date === today() ? " today" : "";
+    const dark = isDarkNight(date, threshold);
+    const outing = dark && rec && isRest(rec.shift);
+    const darkCls = outing ? " dark outing" : dark ? " dark" : "";
+    const moonMark = dark ? `<span class="cal-moon" title="暗夜 · 月照 ${fmtIllum(moonIllumination(date))}">月</span>` : "";
     if (!rec) {
-      cells.push(`<div class="cal-cell${todayCls}"><span class="cal-num">${day}</span></div>`);
+      cells.push(
+        `<div class="cal-cell${todayCls}${darkCls}"><span class="cal-num">${day}</span>${moonMark}</div>`
+      );
       continue;
     }
     const rest = isRest(rec.shift);
     const tag = rest ? "休" : "班";
     const code = rest ? "" : `<span class="cal-code">${esc(rec.shift)}</span>`;
     cells.push(
-      `<a class="cal-cell${todayCls}${rest ? " rest" : " work"}" href="#/work/shifts/${rec.id}"><span class="cal-num">${day}</span><span class="cal-tag">${tag}</span>${code}</a>`
+      `<a class="cal-cell${todayCls}${rest ? " rest" : " work"}${darkCls}" href="#/work/shifts/${rec.id}"><span class="cal-num">${day}</span><span class="cal-tag">${tag}</span>${code}${moonMark}</a>`
     );
   }
   return `
@@ -412,6 +523,7 @@ function renderCalendar(ym) {
         <button class="ghost cal-nav" data-cal="1" type="button">›</button>
       </div>
       <button class="ghost cal-today" data-cal="today" type="button">今天</button>
+      <p class="meta cal-legend">「月」= 暗夜（月照 ≤ ${Math.round(threshold * 100)}%）；休息+暗夜可出摊。</p>
       <div class="cal-week">${DAYS.map((day) => `<span>${day}</span>`).join("")}</div>
       <div class="cal-grid">${cells.join("")}</div>
     </div>
@@ -563,14 +675,32 @@ function remove(listName, id) {
   save();
 }
 
+function outingPeekHtml(nights, emptyText) {
+  if (!nights.length) return `<div>${esc(emptyText)}</div>`;
+  return nights
+    .map((item) => {
+      const weekday = parseIsoDate(item.date).toLocaleDateString("zh-CN", { weekday: "short" });
+      return `<div>${fmtDate(item.date)}（${weekday}）：<b>${esc(outingKindLabel(item.kind))}</b> · ${esc(item.phase)} · 月照 ${fmtIllum(item.illumination)}</div>`;
+    })
+    .join("");
+}
+
 function renderHome() {
   const shift = todayShift();
   const reminders = todayReminders();
+  const upcomingOutings = outingNights(7);
+  const todayDark = isDarkNight(today()) ? classifyDarkNight(today()) : null;
   const shiftLine = !shift
     ? "<div>今天还没有排班。</div>"
     : isRest(shift.shift)
       ? "<div>今天休息。</div>"
       : `<div>今天上班：<b>${esc(shift.shift)}</b></div>`;
+  const todayAstroLine = todayDark
+    ? `<div>今晚${todayDark.kind === "outing" ? "可出摊" : todayDark.kind === "busy" ? "暗夜但要上班" : "是暗夜候选"}：<b>${esc(todayDark.phase)}</b> · 月照 ${fmtIllum(todayDark.illumination)}</div>`
+    : "";
+  const outingLines = upcomingOutings.length
+    ? outingPeekHtml(upcomingOutings, "")
+    : "<div>未来 7 天没有「休息 + 暗夜」可出摊（可先导入排班，或到天文页放宽月照）。</div>";
   return `
     <header class="top">
       <div>
@@ -584,7 +714,7 @@ function renderHome() {
       </div>
     </header>
     <div class="grid">
-      <a class="tile" href="#/astro"><i class="dot astro"></i><strong>天文摄影</strong><span>${state.astro.length} 条拍摄记录</span></a>
+      <a class="tile" href="#/astro"><i class="dot astro"></i><strong>天文摄影</strong><span>${state.astro.length} 条拍摄 · ${upcomingOutings.length} 天可出摊</span></a>
       <a class="tile" href="#/work"><i class="dot work"></i><strong>排班日历</strong><span>${state.shifts.filter((item) => !isRest(item.shift) && item.date.startsWith(today().slice(0, 7))).length} 天本月要上班</span></a>
       <a class="tile" href="#/games"><i class="dot games"></i><strong>游戏进度</strong><span>僵尸地图 ${state.zomboid.length} · 手游 ${state.games.length}</span></a>
       <a class="tile" href="#/fitness"><i class="dot fit"></i><strong>健身提醒</strong><span>${reminders.length} 项今天要做</span></a>
@@ -593,12 +723,18 @@ function renderHome() {
       <h2>今天</h2>
       <div class="peek">
         ${shiftLine}
+        ${todayAstroLine}
         ${
           reminders.length
             ? reminders.map((item) => `<div>健身：<b>${esc(item.time)} ${esc(item.title)}</b></div>`).join("")
             : "<div>今天没有开启的健身提醒。</div>"
         }
       </div>
+    </section>
+    <section class="card panel">
+      <h2>适合出摊</h2>
+      <p class="meta">未来 7 天 · 休息日且月照 ≤ ${Math.round(getDarkThreshold() * 100)}%</p>
+      <div class="peek">${outingLines}</div>
     </section>
     ${nav("home")}
   `;
@@ -610,9 +746,43 @@ function renderAstro() {
     title: item.target,
     meta: `${fmtDate(item.date)} · ${item.place || "地点未填"}`,
   }));
+  const threshold = getDarkThreshold();
+  const candidates = darkNightCandidates();
+  const outings = candidates.filter((item) => item.kind === "outing");
+  const busy = candidates.filter((item) => item.kind === "busy");
+  const only = candidates.filter((item) => item.kind === "candidate");
+  const ranked = [...outings, ...busy, ...only];
+  const hasShifts = state.shifts.length > 0;
+  const listHtml = ranked.length
+    ? ranked
+        .map((item) => {
+          const weekday = parseIsoDate(item.date).toLocaleDateString("zh-CN", { weekday: "short" });
+          const shiftHint =
+            item.kind === "outing"
+              ? "休息"
+              : item.kind === "busy"
+                ? `上班 ${item.shift}`
+                : hasShifts
+                  ? "无排班"
+                  : "未导入排班";
+          return `<div class="card item outing-card ${item.kind}"><h3>${fmtDate(item.date)} · ${esc(outingKindLabel(item.kind))}</h3><div class="meta">${weekday} · ${esc(item.phase)} · 月照 ${fmtIllum(item.illumination)} · ${esc(shiftHint)}</div></div>`;
+        })
+        .join("")
+    : empty("未来 60 天没有符合当前月照阈值的暗夜。");
   return `
     <header class="top"><div><p class="eyebrow">拍摄记录</p><h1>天文摄影</h1></div></header>
-    <div class="toolbar"><span class="meta">${items.length} 条</span></div>
+    <section class="card panel">
+      <h2>适合出摊</h2>
+      <p class="meta">按月照找暗夜，再对照排班：休息 = 可出摊。</p>
+      <div class="threshold">
+        <button type="button" class="ghost ${threshold === 0.3 ? "active" : ""}" data-dark-threshold="0.3">月照 ≤ 30%</button>
+        <button type="button" class="ghost ${threshold === 0.5 ? "active" : ""}" data-dark-threshold="0.5">月照 ≤ 50%</button>
+      </div>
+      <p class="meta">${outings.length} 天可出摊 · ${busy.length} 天暗夜要上班 · ${only.length} 天仅候选</p>
+      ${!hasShifts ? `<p class="meta">还没有排班时只显示暗夜候选，请到工作页导入排班表。</p>` : ""}
+      <div class="list outing-list">${listHtml}</div>
+    </section>
+    <div class="toolbar"><span class="meta">${items.length} 条拍摄记录</span></div>
     <button class="primary block" data-add="astro">记一次拍摄</button>
     <div class="list">${
       items.length ? items.map((item) => itemCard(`/astro/${item.id}`, item.title, item.meta)).join("") : empty("还没有拍摄记录。把目标、地点和器材记下来。")
@@ -981,9 +1151,15 @@ document.addEventListener("click", (event) => {
   const exp = event.target.closest("[data-export]");
   const imp = event.target.closest("[data-import]");
   const impShifts = event.target.closest("[data-import-shifts]");
+  const darkThreshold = event.target.closest("[data-dark-threshold]");
   if (event.target.classList.contains("sheet")) closeSheet();
   if (cal) {
     moveCalendar(cal.getAttribute("data-cal"));
+    render();
+    return;
+  }
+  if (darkThreshold) {
+    setDarkThreshold(Number(darkThreshold.getAttribute("data-dark-threshold")));
     render();
     return;
   }

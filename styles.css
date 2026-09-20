@@ -479,3 +479,70 @@ textarea {
   color: var(--muted);
   margin-top: 1px;
 }
+
+.cal-legend {
+  text-align: center;
+  margin: 0 0 10px;
+}
+
+.cal-moon {
+  display: block;
+  margin: 2px auto 0;
+  width: 18px;
+  height: 18px;
+  line-height: 18px;
+  border-radius: 50%;
+  font-size: 10px;
+  color: #5b6578;
+  background: #dde3ef;
+}
+
+.cal-cell.dark .cal-moon {
+  background: #cfd8ea;
+  color: #3d4a63;
+}
+
+.cal-cell.dark.outing .cal-moon {
+  background: #5a9e78;
+  color: #fff;
+}
+
+.cal-cell.dark.outing {
+  background: rgba(90, 158, 120, 0.08);
+}
+
+.threshold {
+  display: flex;
+  gap: 8px;
+  margin: 10px 0 8px;
+}
+
+.threshold .ghost {
+  flex: 1;
+}
+
+.threshold .ghost.active {
+  border-color: var(--blue);
+  color: var(--blue);
+  background: rgba(77, 126, 200, 0.08);
+}
+
+.outing-list {
+  margin-top: 8px;
+}
+
+.outing-card {
+  pointer-events: none;
+}
+
+.outing-card.outing {
+  border-color: rgba(90, 158, 120, 0.35);
+}
+
+.outing-card.busy h3 {
+  color: var(--muted);
+}
+
+.outing-card.candidate h3 {
+  color: var(--blue);
+}
