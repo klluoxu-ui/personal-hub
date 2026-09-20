@@ -1,9 +1,9 @@
-const CACHE = "personal-hub-v11";
+const CACHE = "personal-hub-v12";
 const ASSETS = [
   "./",
   "./index.html",
-  "./styles.css?v=14",
-  "./app.js?v=14",
+  "./styles.css?v=15",
+  "./app.js?v=15",
   "./manifest.webmanifest",
   "./icon.svg",
 ];
