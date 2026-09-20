@@ -594,13 +594,3 @@ textarea {
   margin: 8px 0;
   background: #e8edf5;
 }
-
-.sheet .actions {
-  display: flex;
-  gap: 8px;
-}
-
-.sheet .actions .primary,
-.sheet .actions .secondary {
-  flex: 1;
-}
