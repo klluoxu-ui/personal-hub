@@ -129,6 +129,21 @@ const KNOWN_NEW_MOON_MS = Date.UTC(2000, 0, 6, 18, 14, 0);
 /** @type {{ status: string, error: string|null }} */
 let cloudState = { status: "idle", error: null };
 let cityHits = null;
+let cityQuery = "";
+let citySearching = false;
+
+const ASTRO_PLACES = [
+  { keys: ["凯里市", "凯里"], name: "凯里市 · 贵州黔东南", lat: 26.57105, lon: 107.97695 },
+  {
+    keys: ["雷公山风景区", "雷公山景区", "雷公山国家级自然保护区", "雷公山"],
+    name: "雷公山风景区 · 贵州雷山",
+    lat: 26.38722,
+    lon: 108.20255,
+  },
+  { keys: ["雷山县", "雷山"], name: "雷山县 · 贵州黔东南", lat: 26.38254, lon: 108.07531 },
+];
+
+const GEO_KEEP = new Set(["place", "boundary", "natural", "tourism", "leisure", "peak"]);
 
 function getDarkThreshold() {
   return localStorage.getItem(DARK_THRESHOLD_KEY) === "0.5" ? 0.5 : 0.3;
@@ -285,29 +300,124 @@ async function ensureCloudForecast() {
   }
 }
 
+function placeKeyMatches(query, key) {
+  return query.includes(key) || (query.length >= 2 && key.startsWith(query));
+}
+
+function matchAstroPlaces(query) {
+  return ASTRO_PLACES.filter((place) => place.keys.some((key) => placeKeyMatches(query, key))).map((place) => ({
+    name: place.name,
+    lat: place.lat,
+    lon: place.lon,
+  }));
+}
+
+function stripPlaceSuffix(query) {
+  return query
+    .replace(/国家级自然保护区|自然保护区|风景名胜区|风景区|景区/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function regionHint(query) {
+  const match = query.match(
+    /北京|天津|上海|重庆|河北|山西|辽宁|吉林|黑龙江|江苏|浙江|安徽|福建|江西|山东|河南|湖北|湖南|广东|海南|四川|贵州|云南|陕西|甘肃|青海|台湾|内蒙古|广西|西藏|宁夏|新疆|香港|澳门|黔东南|黔南|黔西南|雷山|凯里/
+  );
+  return match ? match[0] : "";
+}
+
+function nominatimQueries(query) {
+  const stripped = stripPlaceSuffix(query);
+  const region = regionHint(query);
+  const list = [query];
+  if (stripped && stripped !== query) {
+    list.push(region && !stripped.includes(region) ? `${stripped} ${region}` : stripped);
+  }
+  const tail = (stripped || query).match(/([\u4e00-\u9fff]{2}(?:市|县))$/);
+  if (tail) list.push(tail[1]);
+  return [...new Set(list.filter(Boolean))];
+}
+
+function geoHitKey(hit) {
+  return `${hit.name}|${hit.lat.toFixed(3)}|${hit.lon.toFixed(3)}`;
+}
+
+function mergeGeoHits(...groups) {
+  const seen = new Set();
+  const out = [];
+  groups.flat().forEach((hit) => {
+    if (!hit || !Number.isFinite(hit.lat) || !Number.isFinite(hit.lon)) return;
+    const key = geoHitKey(hit);
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(hit);
+  });
+  return out;
+}
+
+function formatNominatimName(item) {
+  const addr = item.address || {};
+  const title = item.name || item.display_name?.split(",")[0] || "地点";
+  const area = [addr.state, addr.city || addr.county || addr.town].filter(Boolean);
+  const uniq = area.filter((part, index) => part !== title && area.indexOf(part) === index);
+  return uniq.length ? `${title} · ${uniq.join(" ")}` : title;
+}
+
+function usefulNominatim(item, cores) {
+  const category = item.category || "";
+  const type = item.type || "";
+  const name = `${item.name || ""} ${item.display_name || ""}`;
+  const related = cores.some((core) => core.length >= 2 && name.includes(core));
+  if (!related) return false;
+  if (GEO_KEEP.has(category) || GEO_KEEP.has(type)) return true;
+  return related && !["building", "highway", "landuse", "shop", "office", "amenity"].includes(category);
+}
+
+async function fetchNominatim(term) {
+  const url =
+    `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(term)}` +
+    `&format=jsonv2&limit=8&accept-language=zh&countrycodes=cn&addressdetails=1`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error("geo");
+  const json = await res.json();
+  return Array.isArray(json) ? json : [];
+}
+
 async function searchCity(query) {
   const q = String(query || "").trim();
+  cityQuery = q;
   if (!q) {
     cityHits = [];
+    citySearching = false;
     render();
     return;
   }
+  citySearching = true;
+  render();
+  const aliases = matchAstroPlaces(q);
+  const cores = [...new Set([q, stripPlaceSuffix(q), ...q.match(/[\u4e00-\u9fff]{2,}/g) || []])];
   try {
-    const url =
-      `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(q)}` +
-      `&count=6&language=zh&format=json`;
-    const res = await fetch(url);
-    if (!res.ok) throw new Error("geo");
-    const json = await res.json();
-    cityHits = (json.results || []).map((item) => ({
-      name: [item.name, item.admin1, item.country].filter(Boolean).join(" · "),
-      lat: item.latitude,
-      lon: item.longitude,
-    }));
+    const remote = [];
+    const terms = nominatimQueries(q).slice(0, 2);
+    for (let i = 0; i < terms.length; i += 1) {
+      if (i) await new Promise((resolve) => setTimeout(resolve, 1100));
+      const rows = await fetchNominatim(terms[i]);
+      rows.forEach((item) => {
+        if (!usefulNominatim(item, cores)) return;
+        remote.push({
+          name: formatNominatimName(item),
+          lat: Number(item.lat),
+          lon: Number(item.lon),
+        });
+      });
+      if (mergeGeoHits(aliases, remote).length >= 3) break;
+    }
+    cityHits = mergeGeoHits(aliases, remote).slice(0, 8);
   } catch {
-    cityHits = [];
-    alert("城市搜索失败。");
+    cityHits = aliases.length ? aliases : [];
+    if (!cityHits.length) alert("地点搜索失败。");
   }
+  citySearching = false;
   render();
 }
 
@@ -967,16 +1077,18 @@ function renderAstro() {
         .join("")
     : empty("未来 60 天没有符合当前月照阈值的暗夜。");
   const cityList =
-    cityHits == null
-      ? ""
-      : cityHits.length
-        ? `<div class="city-hits">${cityHits
-            .map(
-              (hit, index) =>
-                `<button type="button" class="ghost block" data-pick-city="${index}">${esc(hit.name)}</button>`
-            )
-            .join("")}</div>`
-        : `<p class="meta">没有找到城市。</p>`;
+    citySearching
+      ? `<p class="meta">正在搜索地点…</p>`
+      : cityHits == null
+        ? ""
+        : cityHits.length
+          ? `<div class="city-hits">${cityHits
+              .map(
+                (hit, index) =>
+                  `<button type="button" class="ghost block" data-pick-city="${index}">${esc(hit.name)}</button>`
+              )
+              .join("")}</div>`
+          : `<p class="meta">没有找到地点。可试「凯里市」或「雷公山 贵州」。</p>`;
   return `
     <header class="top"><div><p class="eyebrow">拍摄记录</p><h1>天文摄影</h1></div></header>
     <section class="card panel">
@@ -988,13 +1100,13 @@ function renderAstro() {
         <button type="button" class="ghost" data-cloud-refresh>刷新云量</button>
       </div>
       <form class="city-form" data-city-search>
-        <label>城市搜索
-          <input name="city" type="search" placeholder="例如 上海 / 杭州" autocomplete="off" />
+        <label>地点搜索
+          <input name="city" type="search" placeholder="凯里市 / 雷公山风景区" value="${esc(cityQuery)}" autocomplete="off" />
         </label>
         <button class="secondary" type="submit">搜索</button>
       </form>
       ${cityList}
-      <p class="meta">云量来自 Open-Meteo（约 16 天）。天文通无公开接口，仅作可选核对。</p>
+      <p class="meta">城市、景区都可搜；带上省名更准。云量来自 Open-Meteo（约 16 天）。</p>
     </section>
     <section class="card panel">
       <h2>适合出摊</h2>
