@@ -114,6 +114,286 @@ function isRest(shift) {
   return shift === "休息";
 }
 
+const DARK_THRESHOLD_KEY = "personal-hub-dark-threshold";
+const ASTRO_LOC_KEY = "personal-hub-astro-location";
+const CLOUD_CACHE_KEY = "personal-hub-cloud-cache";
+const DARK_HORIZON_DAYS = 60;
+const CLOUD_FORECAST_DAYS = 16;
+const CLOUD_CLEAR_MAX = 40;
+const CLOUD_CACHE_MS = 6 * 60 * 60 * 1000;
+const TWT_URL = "https://twtapp.com/";
+const SYNODIC_MONTH = 29.530588853;
+/** Known new moon near J2000: 2000-01-06 18:14 UTC */
+const KNOWN_NEW_MOON_MS = Date.UTC(2000, 0, 6, 18, 14, 0);
+
+/** @type {{ status: string, error: string|null }} */
+let cloudState = { status: "idle", error: null };
+let cityHits = null;
+
+function getDarkThreshold() {
+  return localStorage.getItem(DARK_THRESHOLD_KEY) === "0.5" ? 0.5 : 0.3;
+}
+
+function setDarkThreshold(value) {
+  localStorage.setItem(DARK_THRESHOLD_KEY, value === 0.5 ? "0.5" : "0.3");
+}
+
+function getAstroLocation() {
+  try {
+    const loc = JSON.parse(localStorage.getItem(ASTRO_LOC_KEY) || "null");
+    if (loc && typeof loc.lat === "number" && typeof loc.lon === "number") return loc;
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+function setAstroLocation(loc) {
+  localStorage.setItem(ASTRO_LOC_KEY, JSON.stringify(loc));
+  localStorage.removeItem(CLOUD_CACHE_KEY);
+  cloudState = { status: "idle", error: null };
+  cityHits = null;
+  ensureCloudForecast();
+}
+
+function parseIsoDate(iso) {
+  const [y, m, d] = iso.split("-").map(Number);
+  return new Date(y, m - 1, d);
+}
+
+function addDaysIso(iso, days) {
+  const date = parseIsoDate(iso);
+  date.setDate(date.getDate() + days);
+  return isoDate(date.getFullYear(), date.getMonth() + 1, date.getDate());
+}
+
+/** Moon age in days (0 = new moon) for a local calendar date at local noon. */
+function moonAgeDays(iso) {
+  const [y, m, d] = iso.split("-").map(Number);
+  const noonLocal = new Date(y, m - 1, d, 12, 0, 0);
+  let age = ((noonLocal.getTime() - KNOWN_NEW_MOON_MS) / 86400000) % SYNODIC_MONTH;
+  if (age < 0) age += SYNODIC_MONTH;
+  return age;
+}
+
+/** Illuminated fraction 0–1 (0 ≈ new, 1 ≈ full). */
+function moonIllumination(iso) {
+  const age = moonAgeDays(iso);
+  return (1 - Math.cos((2 * Math.PI * age) / SYNODIC_MONTH)) / 2;
+}
+
+function moonPhaseLabel(iso) {
+  const age = moonAgeDays(iso);
+  const phase = age / SYNODIC_MONTH;
+  if (phase < 0.03 || phase >= 0.97) return "新月";
+  if (phase < 0.22) return "蛾眉月";
+  if (phase < 0.28) return "上弦";
+  if (phase < 0.47) return "盈凸月";
+  if (phase < 0.53) return "满月";
+  if (phase < 0.72) return "亏凸月";
+  if (phase < 0.78) return "下弦";
+  return "残月";
+}
+
+function fmtIllum(illum) {
+  return `${Math.round(illum * 100)}%`;
+}
+
+function fmtCloud(cloud) {
+  if (cloud == null) return "无云量";
+  return `云量 ${Math.round(cloud)}%`;
+}
+
+function shiftForDate(iso) {
+  return state.shifts.find((item) => item.date === iso);
+}
+
+function loadCloudCache() {
+  const loc = getAstroLocation();
+  if (!loc) return null;
+  try {
+    const data = JSON.parse(localStorage.getItem(CLOUD_CACHE_KEY) || "null");
+    if (!data?.byNight) return null;
+    if (Math.abs(data.lat - loc.lat) > 0.01 || Math.abs(data.lon - loc.lon) > 0.01) return null;
+    if (Date.now() - Number(data.fetchedAt || 0) > CLOUD_CACHE_MS) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+function nightCloudAvg(iso) {
+  const cache = loadCloudCache();
+  if (!cache) return null;
+  const value = cache.byNight[iso];
+  return typeof value === "number" ? value : null;
+}
+
+/** Aggregate 21:00–03:00 cloud cover for each evening date. */
+function aggregateNightCloud(times, covers) {
+  const buckets = {};
+  times.forEach((stamp, index) => {
+    const cover = covers[index];
+    if (cover == null) return;
+    const [datePart, timePart] = stamp.split("T");
+    const hour = Number((timePart || "").slice(0, 2));
+    if (Number.isNaN(hour)) return;
+    let nightDate = datePart;
+    if (hour <= 3) nightDate = addDaysIso(datePart, -1);
+    else if (hour < 21) return;
+    if (!buckets[nightDate]) buckets[nightDate] = [];
+    buckets[nightDate].push(cover);
+  });
+  const byNight = {};
+  Object.entries(buckets).forEach(([date, values]) => {
+    byNight[date] = values.reduce((sum, n) => sum + n, 0) / values.length;
+  });
+  return byNight;
+}
+
+async function ensureCloudForecast() {
+  const loc = getAstroLocation();
+  if (!loc) {
+    cloudState = { status: "idle", error: null };
+    return;
+  }
+  if (loadCloudCache()) {
+    cloudState = { status: "ready", error: null };
+    return;
+  }
+  if (cloudState.status === "loading") return;
+  cloudState = { status: "loading", error: null };
+  try {
+    const url =
+      `https://api.open-meteo.com/v1/forecast?latitude=${loc.lat}&longitude=${loc.lon}` +
+      `&hourly=cloud_cover&forecast_days=${CLOUD_FORECAST_DAYS}&timezone=auto`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error("meteo");
+    const json = await res.json();
+    const times = json.hourly?.time || [];
+    const covers = json.hourly?.cloud_cover || [];
+    const byNight = aggregateNightCloud(times, covers);
+    localStorage.setItem(
+      CLOUD_CACHE_KEY,
+      JSON.stringify({ lat: loc.lat, lon: loc.lon, fetchedAt: Date.now(), byNight })
+    );
+    cloudState = { status: "ready", error: null };
+    render();
+  } catch {
+    cloudState = { status: "error", error: "云量预报暂时读不到。" };
+    render();
+  }
+}
+
+async function searchCity(query) {
+  const q = String(query || "").trim();
+  if (!q) {
+    cityHits = [];
+    render();
+    return;
+  }
+  try {
+    const url =
+      `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(q)}` +
+      `&count=6&language=zh&format=json`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error("geo");
+    const json = await res.json();
+    cityHits = (json.results || []).map((item) => ({
+      name: [item.name, item.admin1, item.country].filter(Boolean).join(" · "),
+      lat: item.latitude,
+      lon: item.longitude,
+    }));
+  } catch {
+    cityHits = [];
+    alert("城市搜索失败。");
+  }
+  render();
+}
+
+function locateAstro() {
+  if (!navigator.geolocation) {
+    alert("当前浏览器不支持定位。");
+    return;
+  }
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      setAstroLocation({
+        name: "当前位置",
+        lat: pos.coords.latitude,
+        lon: pos.coords.longitude,
+      });
+      render();
+    },
+    () => alert("定位失败，请改用城市搜索。"),
+    { enableHighAccuracy: false, timeout: 12000 }
+  );
+}
+
+/**
+ * Classify a dark-sky night against cloud + roster.
+ * kind: outing | busy | candidate
+ * sky: clear | cloudy | unknown
+ */
+function classifyDarkNight(iso, illum = moonIllumination(iso)) {
+  const rec = shiftForDate(iso);
+  const cloud = nightCloudAvg(iso);
+  const sky = cloud == null ? "unknown" : cloud <= CLOUD_CLEAR_MAX ? "clear" : "cloudy";
+  const rest = rec && isRest(rec.shift);
+  const work = rec && !isRest(rec.shift);
+  let kind = "candidate";
+  if (work) kind = "busy";
+  else if (rest && sky === "clear") kind = "outing";
+  return {
+    date: iso,
+    illumination: illum,
+    phase: moonPhaseLabel(iso),
+    kind,
+    shift: rec ? rec.shift : null,
+    cloud,
+    sky,
+  };
+}
+
+function isDarkNight(iso, threshold = getDarkThreshold()) {
+  return moonIllumination(iso) <= threshold;
+}
+
+/** Dark nights from today through +horizon days, sorted by date. */
+function darkNightCandidates(horizon = DARK_HORIZON_DAYS, threshold = getDarkThreshold()) {
+  const start = today();
+  const list = [];
+  for (let i = 0; i <= horizon; i += 1) {
+    const date = addDaysIso(start, i);
+    const illum = moonIllumination(date);
+    if (illum <= threshold) list.push(classifyDarkNight(date, illum));
+  }
+  return list;
+}
+
+function outingNights(horizon = DARK_HORIZON_DAYS, threshold = getDarkThreshold()) {
+  return darkNightCandidates(horizon, threshold).filter((item) => item.kind === "outing");
+}
+
+function outingKindLabel(item) {
+  if (typeof item === "string") {
+    if (item === "outing") return "可出摊";
+    if (item === "busy") return "暗夜但要上班";
+    return "暗夜候选";
+  }
+  if (item.kind === "outing") return "可出摊";
+  if (item.kind === "busy") return "暗夜但要上班";
+  if (item.sky === "cloudy" && item.shift === "休息") return "休息但多云";
+  if (item.sky === "unknown") return "暗夜候选（无云量）";
+  return "暗夜候选";
+}
+
+function skyHint(item) {
+  if (item.sky === "clear") return fmtCloud(item.cloud);
+  if (item.sky === "cloudy") return fmtCloud(item.cloud);
+  return "无云量预报";
+}
+
 function loadXlsx() {
   if (window.XLSX) return Promise.resolve();
   return new Promise((resolve, reject) => {
@@ -384,21 +664,33 @@ function renderCalendar(ym) {
   const [year, month] = ym.split("-").map(Number);
   const firstWeekday = new Date(year, month - 1, 1).getDay();
   const daysInMonth = new Date(year, month, 0).getDate();
+  const threshold = getDarkThreshold();
   const cells = [];
   for (let i = 0; i < firstWeekday; i += 1) cells.push(`<div class="cal-cell pad"></div>`);
   for (let day = 1; day <= daysInMonth; day += 1) {
     const date = isoDate(year, month, day);
     const rec = state.shifts.find((item) => item.date === date);
     const todayCls = date === today() ? " today" : "";
+    const dark = isDarkNight(date, threshold);
+    const scored = dark ? classifyDarkNight(date) : null;
+    const outing = scored?.kind === "outing";
+    const cloudy = scored?.sky === "cloudy";
+    const darkCls = outing ? " dark outing" : cloudy ? " dark cloudy" : dark ? " dark" : "";
+    const moonTitle = scored
+      ? `暗夜 · 月照 ${fmtIllum(scored.illumination)} · ${skyHint(scored)}`
+      : "";
+    const moonMark = dark ? `<span class="cal-moon" title="${esc(moonTitle)}">月</span>` : "";
     if (!rec) {
-      cells.push(`<div class="cal-cell${todayCls}"><span class="cal-num">${day}</span></div>`);
+      cells.push(
+        `<div class="cal-cell${todayCls}${darkCls}"><span class="cal-num">${day}</span>${moonMark}</div>`
+      );
       continue;
     }
     const rest = isRest(rec.shift);
     const tag = rest ? "休" : "班";
     const code = rest ? "" : `<span class="cal-code">${esc(rec.shift)}</span>`;
     cells.push(
-      `<a class="cal-cell${todayCls}${rest ? " rest" : " work"}" href="#/work/shifts/${rec.id}"><span class="cal-num">${day}</span><span class="cal-tag">${tag}</span>${code}</a>`
+      `<a class="cal-cell${todayCls}${rest ? " rest" : " work"}${darkCls}" href="#/work/shifts/${rec.id}"><span class="cal-num">${day}</span><span class="cal-tag">${tag}</span>${code}${moonMark}</a>`
     );
   }
   return `
@@ -412,6 +704,7 @@ function renderCalendar(ym) {
         <button class="ghost cal-nav" data-cal="1" type="button">›</button>
       </div>
       <button class="ghost cal-today" data-cal="today" type="button">今天</button>
+      <p class="meta cal-legend">「月」= 暗夜；绿色 = 休息+暗夜+较晴可出摊（需设置观测点）。</p>
       <div class="cal-week">${DAYS.map((day) => `<span>${day}</span>`).join("")}</div>
       <div class="cal-grid">${cells.join("")}</div>
     </div>
@@ -563,14 +856,42 @@ function remove(listName, id) {
   save();
 }
 
+function outingPeekHtml(nights, emptyText) {
+  if (!nights.length) return `<div>${esc(emptyText)}</div>`;
+  return nights
+    .map((item) => {
+      const weekday = parseIsoDate(item.date).toLocaleDateString("zh-CN", { weekday: "short" });
+      return `<div>${fmtDate(item.date)}（${weekday}）：<b>${esc(outingKindLabel(item))}</b> · ${esc(item.phase)} · 月照 ${fmtIllum(item.illumination)} · ${esc(skyHint(item))}</div>`;
+    })
+    .join("");
+}
+
+function cloudStatusLine() {
+  const loc = getAstroLocation();
+  if (!loc) return "未设置观测点，暂不筛云量。";
+  if (cloudState.status === "loading") return `正在拉取 ${esc(loc.name || "观测点")} 云量…`;
+  if (cloudState.status === "error") return cloudState.error || "云量预报失败。";
+  if (cloudState.status === "ready" || loadCloudCache()) return `${esc(loc.name || "观测点")} · 夜间云量已更新`;
+  return `${esc(loc.name || "观测点")} · 等待云量`;
+}
+
 function renderHome() {
   const shift = todayShift();
   const reminders = todayReminders();
+  const upcomingOutings = outingNights(7);
+  const todayDark = isDarkNight(today()) ? classifyDarkNight(today()) : null;
+  const loc = getAstroLocation();
   const shiftLine = !shift
     ? "<div>今天还没有排班。</div>"
     : isRest(shift.shift)
       ? "<div>今天休息。</div>"
       : `<div>今天上班：<b>${esc(shift.shift)}</b></div>`;
+  const todayAstroLine = todayDark
+    ? `<div>今晚${esc(outingKindLabel(todayDark))}：<b>${esc(todayDark.phase)}</b> · 月照 ${fmtIllum(todayDark.illumination)} · ${esc(skyHint(todayDark))}</div>`
+    : "";
+  const outingLines = upcomingOutings.length
+    ? outingPeekHtml(upcomingOutings, "")
+    : `<div>未来 7 天没有「休息 + 暗夜 + 较晴」可出摊。${!loc ? "请到天文页设置观测点。" : "可先导入排班，或放宽月照。"}</div>`;
   return `
     <header class="top">
       <div>
@@ -584,7 +905,7 @@ function renderHome() {
       </div>
     </header>
     <div class="grid">
-      <a class="tile" href="#/astro"><i class="dot astro"></i><strong>天文摄影</strong><span>${state.astro.length} 条拍摄记录</span></a>
+      <a class="tile" href="#/astro"><i class="dot astro"></i><strong>天文摄影</strong><span>${state.astro.length} 条拍摄 · ${upcomingOutings.length} 天可出摊</span></a>
       <a class="tile" href="#/work"><i class="dot work"></i><strong>排班日历</strong><span>${state.shifts.filter((item) => !isRest(item.shift) && item.date.startsWith(today().slice(0, 7))).length} 天本月要上班</span></a>
       <a class="tile" href="#/games"><i class="dot games"></i><strong>游戏进度</strong><span>僵尸地图 ${state.zomboid.length} · 手游 ${state.games.length}</span></a>
       <a class="tile" href="#/fitness"><i class="dot fit"></i><strong>健身提醒</strong><span>${reminders.length} 项今天要做</span></a>
@@ -593,12 +914,19 @@ function renderHome() {
       <h2>今天</h2>
       <div class="peek">
         ${shiftLine}
+        ${todayAstroLine}
         ${
           reminders.length
             ? reminders.map((item) => `<div>健身：<b>${esc(item.time)} ${esc(item.title)}</b></div>`).join("")
             : "<div>今天没有开启的健身提醒。</div>"
         }
       </div>
+    </section>
+    <section class="card panel">
+      <h2>适合出摊</h2>
+      <p class="meta">未来 7 天 · 休息 + 月照 ≤ ${Math.round(getDarkThreshold() * 100)}% + 夜间云量 ≤ ${CLOUD_CLEAR_MAX}%</p>
+      <p class="meta">${cloudStatusLine()}</p>
+      <div class="peek">${outingLines}</div>
     </section>
     ${nav("home")}
   `;
@@ -610,9 +938,76 @@ function renderAstro() {
     title: item.target,
     meta: `${fmtDate(item.date)} · ${item.place || "地点未填"}`,
   }));
+  const threshold = getDarkThreshold();
+  const candidates = darkNightCandidates();
+  const outings = candidates.filter((item) => item.kind === "outing");
+  const busy = candidates.filter((item) => item.kind === "busy");
+  const only = candidates.filter((item) => item.kind === "candidate");
+  const ranked = [...outings, ...busy, ...only];
+  const hasShifts = state.shifts.length > 0;
+  const loc = getAstroLocation();
+  const listHtml = ranked.length
+    ? ranked
+        .map((item) => {
+          const weekday = parseIsoDate(item.date).toLocaleDateString("zh-CN", { weekday: "short" });
+          const shiftHint =
+            item.shift === "休息"
+              ? "休息"
+              : item.shift
+                ? `上班 ${item.shift}`
+                : hasShifts
+                  ? "无排班"
+                  : "未导入排班";
+          return `<div class="card item outing-card ${item.kind} sky-${item.sky}">
+            <h3>${fmtDate(item.date)} · ${esc(outingKindLabel(item))}</h3>
+            <div class="meta">${weekday} · ${esc(item.phase)} · 月照 ${fmtIllum(item.illumination)} · ${esc(skyHint(item))} · ${esc(shiftHint)}</div>
+            <a class="twt-link" href="${TWT_URL}" target="_blank" rel="noopener noreferrer">用天文通核对</a>
+          </div>`;
+        })
+        .join("")
+    : empty("未来 60 天没有符合当前月照阈值的暗夜。");
+  const cityList =
+    cityHits == null
+      ? ""
+      : cityHits.length
+        ? `<div class="city-hits">${cityHits
+            .map(
+              (hit, index) =>
+                `<button type="button" class="ghost block" data-pick-city="${index}">${esc(hit.name)}</button>`
+            )
+            .join("")}</div>`
+        : `<p class="meta">没有找到城市。</p>`;
   return `
     <header class="top"><div><p class="eyebrow">拍摄记录</p><h1>天文摄影</h1></div></header>
-    <div class="toolbar"><span class="meta">${items.length} 条</span></div>
+    <section class="card panel">
+      <h2>观测点</h2>
+      <p class="meta">${loc ? esc(loc.name || `${loc.lat.toFixed(2)}, ${loc.lon.toFixed(2)}`) : "未设置 · 设置后可自动筛夜间云量"}</p>
+      <p class="meta">${cloudStatusLine()}</p>
+      <div class="threshold">
+        <button type="button" class="ghost" data-astro-locate>用定位</button>
+        <button type="button" class="ghost" data-cloud-refresh>刷新云量</button>
+      </div>
+      <form class="city-form" data-city-search>
+        <label>城市搜索
+          <input name="city" type="search" placeholder="例如 上海 / 杭州" autocomplete="off" />
+        </label>
+        <button class="secondary" type="submit">搜索</button>
+      </form>
+      ${cityList}
+      <p class="meta">云量来自 Open-Meteo（约 16 天）。天文通无公开接口，仅作可选核对。</p>
+    </section>
+    <section class="card panel">
+      <h2>适合出摊</h2>
+      <p class="meta">暗夜 + 夜间较晴（云量 ≤ ${CLOUD_CLEAR_MAX}%）+ 休息 = 可出摊。</p>
+      <div class="threshold">
+        <button type="button" class="ghost ${threshold === 0.3 ? "active" : ""}" data-dark-threshold="0.3">月照 ≤ 30%</button>
+        <button type="button" class="ghost ${threshold === 0.5 ? "active" : ""}" data-dark-threshold="0.5">月照 ≤ 50%</button>
+      </div>
+      <p class="meta">${outings.length} 天可出摊 · ${busy.length} 天暗夜要上班 · ${only.length} 天仅候选</p>
+      ${!hasShifts ? `<p class="meta">还没有排班时只显示暗夜候选，请到工作页导入排班表。</p>` : ""}
+      <div class="list outing-list">${listHtml}</div>
+    </section>
+    <div class="toolbar"><span class="meta">${items.length} 条拍摄记录</span></div>
     <button class="primary block" data-add="astro">记一次拍摄</button>
     <div class="list">${
       items.length ? items.map((item) => itemCard(`/astro/${item.id}`, item.title, item.meta)).join("") : empty("还没有拍摄记录。把目标、地点和器材记下来。")
@@ -968,6 +1363,7 @@ function render() {
   root.dataset.detailKind = detail?.kind || "";
   root.dataset.detailId = detail?.item?.id || "";
   root.dataset.detailBack = detail?.back || "";
+  ensureCloudForecast();
 }
 
 document.addEventListener("click", (event) => {
@@ -981,10 +1377,38 @@ document.addEventListener("click", (event) => {
   const exp = event.target.closest("[data-export]");
   const imp = event.target.closest("[data-import]");
   const impShifts = event.target.closest("[data-import-shifts]");
+  const darkThreshold = event.target.closest("[data-dark-threshold]");
+  const locate = event.target.closest("[data-astro-locate]");
+  const refreshCloud = event.target.closest("[data-cloud-refresh]");
+  const pickCity = event.target.closest("[data-pick-city]");
   if (event.target.classList.contains("sheet")) closeSheet();
   if (cal) {
     moveCalendar(cal.getAttribute("data-cal"));
     render();
+    return;
+  }
+  if (darkThreshold) {
+    setDarkThreshold(Number(darkThreshold.getAttribute("data-dark-threshold")));
+    render();
+    return;
+  }
+  if (locate) {
+    locateAstro();
+    return;
+  }
+  if (refreshCloud) {
+    localStorage.removeItem(CLOUD_CACHE_KEY);
+    cloudState = { status: "idle", error: null };
+    ensureCloudForecast();
+    render();
+    return;
+  }
+  if (pickCity) {
+    const hit = cityHits?.[Number(pickCity.getAttribute("data-pick-city"))];
+    if (hit) {
+      setAstroLocation(hit);
+      render();
+    }
     return;
   }
   if (add) startAdd(add.getAttribute("data-add") || "astro");
@@ -1050,6 +1474,12 @@ document.addEventListener("change", (event) => {
 });
 
 document.addEventListener("submit", (event) => {
+  const cityForm = event.target.closest("[data-city-search]");
+  if (cityForm) {
+    event.preventDefault();
+    searchCity(new FormData(cityForm).get("city"));
+    return;
+  }
   const form = event.target.closest(".sheet form");
   if (!form) return;
   event.preventDefault();
