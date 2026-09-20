@@ -121,7 +121,11 @@ const DARK_HORIZON_DAYS = 60;
 const CLOUD_FORECAST_DAYS = 16;
 const CLOUD_CLEAR_MAX = 40;
 const CLOUD_CACHE_MS = 6 * 60 * 60 * 1000;
-const TWT_URL = "https://twtapp.com/";
+const TWT_SCHEME = "twtapp://";
+const TWT_ANDROID_INTENT = "intent://open#Intent;scheme=twtapp;package=com.twtapp;end";
+const TWT_SITE = "https://twtapp.com/";
+const LEAFLET_CSS = "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css";
+const LEAFLET_JS = "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js";
 const SYNODIC_MONTH = 29.530588853;
 /** Known new moon near J2000: 2000-01-06 18:14 UTC */
 const KNOWN_NEW_MOON_MS = Date.UTC(2000, 0, 6, 18, 14, 0);
@@ -131,6 +135,9 @@ let cloudState = { status: "idle", error: null };
 let cityHits = null;
 let cityQuery = "";
 let citySearching = false;
+/** @type {{ lat: number, lon: number, name: string } | null} */
+let mapPicker = null;
+let astroMap = null;
 
 const ASTRO_PLACES = [
   { keys: ["凯里市", "凯里"], name: "凯里市 · 贵州黔东南", lat: 26.57105, lon: 107.97695 },
@@ -423,7 +430,7 @@ async function searchCity(query) {
 
 function locateAstro() {
   if (!navigator.geolocation) {
-    alert("当前浏览器不支持定位。");
+    alert("当前浏览器不支持定位，请用地图选点。");
     return;
   }
   navigator.geolocation.getCurrentPosition(
@@ -435,9 +442,178 @@ function locateAstro() {
       });
       render();
     },
-    () => alert("定位失败，请改用城市搜索。"),
+    () => alert("定位失败，请改用地图选点或地点搜索。"),
     { enableHighAccuracy: false, timeout: 12000 }
   );
+}
+
+function loadLeaflet() {
+  if (window.L) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    if (!document.querySelector(`link[href="${LEAFLET_CSS}"]`)) {
+      const css = document.createElement("link");
+      css.rel = "stylesheet";
+      css.href = LEAFLET_CSS;
+      document.head.appendChild(css);
+    }
+    const script = document.createElement("script");
+    script.src = LEAFLET_JS;
+    script.onload = resolve;
+    script.onerror = () => reject(new Error("leaflet"));
+    document.head.appendChild(script);
+  });
+}
+
+function openMapPicker() {
+  const loc = getAstroLocation();
+  mapPicker = {
+    lat: loc?.lat ?? 26.57105,
+    lon: loc?.lon ?? 107.97695,
+    name: loc?.name || "凯里市 · 贵州黔东南",
+  };
+  render();
+}
+
+function closeMapPicker() {
+  if (astroMap) {
+    astroMap.remove();
+    astroMap = null;
+  }
+  mapPicker = null;
+}
+
+async function reversePlaceName(lat, lon) {
+  try {
+    const url =
+      `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}` +
+      `&format=jsonv2&accept-language=zh&zoom=14`;
+    const res = await fetch(url);
+    if (!res.ok) return "";
+    const json = await res.json();
+    const addr = json.address || {};
+    const title = json.name || addr.tourism || addr.peak || addr.village || addr.town || addr.city || addr.county || "";
+    const area = [addr.state, addr.city || addr.county].filter((part) => part && part !== title);
+    return [title, ...area].filter(Boolean).join(" · ");
+  } catch {
+    return "";
+  }
+}
+
+function updateMapPickerMeta() {
+  const el = document.querySelector("[data-map-meta]");
+  if (!el || !mapPicker) return;
+  el.textContent = `${mapPicker.lat.toFixed(4)}, ${mapPicker.lon.toFixed(4)} · ${mapPicker.name || "地图选点"}`;
+}
+
+async function mountAstroMap() {
+  const el = document.getElementById("astro-map");
+  if (!el || !mapPicker) return;
+  try {
+    await loadLeaflet();
+  } catch {
+    el.innerHTML = `<p class="meta">地图加载失败，请改用地点搜索。</p>`;
+    return;
+  }
+  if (astroMap) {
+    astroMap.remove();
+    astroMap = null;
+  }
+  const map = window.L.map(el, { zoomControl: true }).setView([mapPicker.lat, mapPicker.lon], 11);
+  window.L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 18,
+    attribution: "&copy; OpenStreetMap",
+  }).addTo(map);
+  const marker = window.L.circleMarker([mapPicker.lat, mapPicker.lon], {
+    radius: 9,
+    color: "#4d7ec8",
+    fillColor: "#4d7ec8",
+    fillOpacity: 0.9,
+  }).addTo(map);
+  map.on("click", async (event) => {
+    const { lat, lng } = event.latlng;
+    mapPicker.lat = lat;
+    mapPicker.lon = lng;
+    marker.setLatLng([lat, lng]);
+    updateMapPickerMeta();
+    const name = await reversePlaceName(lat, lng);
+    if (mapPicker) {
+      mapPicker.name = name || "地图选点";
+      updateMapPickerMeta();
+    }
+  });
+  astroMap = map;
+  setTimeout(() => map.invalidateSize(), 50);
+}
+
+function mapPickerHtml() {
+  if (!mapPicker) return "";
+  return `
+    <div class="sheet">
+      <div class="map-picker">
+        <div class="toolbar"><h2>地图选点</h2><button type="button" class="ghost" data-close>关闭</button></div>
+        <p class="meta">点一下地图选观测点，云量会按这个坐标计算。</p>
+        <div id="astro-map" class="astro-map"></div>
+        <p class="meta" data-map-meta>${mapPicker.lat.toFixed(4)}, ${mapPicker.lon.toFixed(4)} · ${esc(mapPicker.name || "地图选点")}</p>
+        <div class="actions">
+          <button class="secondary" type="button" data-map-locate>定位到我</button>
+          <button class="primary" type="button" data-map-confirm>使用此点</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function panMapToMe() {
+  if (!navigator.geolocation) {
+    alert("当前浏览器不支持定位，请直接点地图。");
+    return;
+  }
+  navigator.geolocation.getCurrentPosition(
+    async (pos) => {
+      const lat = pos.coords.latitude;
+      const lon = pos.coords.longitude;
+      if (!mapPicker) return;
+      mapPicker.lat = lat;
+      mapPicker.lon = lon;
+      mapPicker.name = "当前位置";
+      if (astroMap) astroMap.setView([lat, lon], 13);
+      updateMapPickerMeta();
+      const name = await reversePlaceName(lat, lon);
+      if (mapPicker) {
+        mapPicker.name = name || "当前位置";
+        updateMapPickerMeta();
+      }
+    },
+    () => alert("定位失败，请直接点地图选点。"),
+    { enableHighAccuracy: false, timeout: 12000 }
+  );
+}
+
+function confirmMapPicker() {
+  if (!mapPicker) return;
+  setAstroLocation({
+    name: mapPicker.name || "地图选点",
+    lat: mapPicker.lat,
+    lon: mapPicker.lon,
+  });
+  closeMapPicker();
+  render();
+}
+
+function openTwtApp(event) {
+  event.preventDefault();
+  const ua = navigator.userAgent || "";
+  const isAndroid = /Android/i.test(ua);
+  const isIOS = /iPhone|iPad|iPod/i.test(ua);
+  if (isAndroid) {
+    location.href = TWT_ANDROID_INTENT;
+    return;
+  }
+  if (isIOS) {
+    location.href = TWT_SCHEME;
+    return;
+  }
+  window.open(TWT_SITE, "_blank", "noopener,noreferrer");
 }
 
 /**
@@ -895,6 +1071,7 @@ function openSheet(title, fields, onSubmit, extra = "") {
 function closeSheet() {
   sheet = null;
   shiftImport = null;
+  closeMapPicker();
   render();
 }
 
@@ -1071,7 +1248,7 @@ function renderAstro() {
           return `<div class="card item outing-card ${item.kind} sky-${item.sky}">
             <h3>${fmtDate(item.date)} · ${esc(outingKindLabel(item))}</h3>
             <div class="meta">${weekday} · ${esc(item.phase)} · 月照 ${fmtIllum(item.illumination)} · ${esc(skyHint(item))} · ${esc(shiftHint)}</div>
-            <a class="twt-link" href="${TWT_URL}" target="_blank" rel="noopener noreferrer">用天文通核对</a>
+            <button class="twt-link" type="button" data-open-twt>用天文通核对</button>
           </div>`;
         })
         .join("")
@@ -1096,7 +1273,7 @@ function renderAstro() {
       <p class="meta">${loc ? esc(loc.name || `${loc.lat.toFixed(2)}, ${loc.lon.toFixed(2)}`) : "未设置 · 设置后可自动筛夜间云量"}</p>
       <p class="meta">${cloudStatusLine()}</p>
       <div class="threshold">
-        <button type="button" class="ghost" data-astro-locate>用定位</button>
+        <button type="button" class="ghost" data-map-open>地图选点</button>
         <button type="button" class="ghost" data-cloud-refresh>刷新云量</button>
       </div>
       <form class="city-form" data-city-search>
@@ -1106,7 +1283,7 @@ function renderAstro() {
         <button class="secondary" type="submit">搜索</button>
       </form>
       ${cityList}
-      <p class="meta">城市、景区都可搜；带上省名更准。云量来自 Open-Meteo（约 16 天）。</p>
+      <p class="meta">城市、景区都可搜；定位失败时用地图点选。云量来自 Open-Meteo（约 16 天）。</p>
     </section>
     <section class="card panel">
       <h2>适合出摊</h2>
@@ -1471,11 +1648,12 @@ function render() {
     detail = renderDetail();
     page = detail.html;
   }
-  root.innerHTML = page + sheetHtml() + shiftImportHtml();
+  root.innerHTML = page + sheetHtml() + shiftImportHtml() + mapPickerHtml();
   root.dataset.detailKind = detail?.kind || "";
   root.dataset.detailId = detail?.item?.id || "";
   root.dataset.detailBack = detail?.back || "";
   ensureCloudForecast();
+  mountAstroMap();
 }
 
 document.addEventListener("click", (event) => {
@@ -1493,6 +1671,10 @@ document.addEventListener("click", (event) => {
   const locate = event.target.closest("[data-astro-locate]");
   const refreshCloud = event.target.closest("[data-cloud-refresh]");
   const pickCity = event.target.closest("[data-pick-city]");
+  const mapOpen = event.target.closest("[data-map-open]");
+  const mapConfirm = event.target.closest("[data-map-confirm]");
+  const mapLocate = event.target.closest("[data-map-locate]");
+  const openTwt = event.target.closest("[data-open-twt]");
   if (event.target.classList.contains("sheet")) closeSheet();
   if (cal) {
     moveCalendar(cal.getAttribute("data-cal"));
@@ -1502,6 +1684,22 @@ document.addEventListener("click", (event) => {
   if (darkThreshold) {
     setDarkThreshold(Number(darkThreshold.getAttribute("data-dark-threshold")));
     render();
+    return;
+  }
+  if (mapOpen) {
+    openMapPicker();
+    return;
+  }
+  if (mapConfirm) {
+    confirmMapPicker();
+    return;
+  }
+  if (mapLocate) {
+    panMapToMe();
+    return;
+  }
+  if (openTwt) {
+    openTwtApp(event);
     return;
   }
   if (locate) {
