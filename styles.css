@@ -511,6 +511,11 @@ textarea {
   background: rgba(90, 158, 120, 0.08);
 }
 
+.cal-cell.dark.cloudy .cal-moon {
+  background: #b7bcc8;
+  color: #fff;
+}
+
 .threshold {
   display: flex;
   gap: 8px;
@@ -527,12 +532,31 @@ textarea {
   background: rgba(77, 126, 200, 0.08);
 }
 
+.city-form {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: end;
+  margin: 8px 0;
+}
+
+.city-form label {
+  margin: 0;
+}
+
+.city-hits {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
 .outing-list {
   margin-top: 8px;
 }
 
 .outing-card {
-  pointer-events: none;
+  display: block;
 }
 
 .outing-card.outing {
@@ -545,4 +569,16 @@ textarea {
 
 .outing-card.candidate h3 {
   color: var(--blue);
+}
+
+.outing-card.sky-cloudy h3 {
+  color: var(--muted);
+}
+
+.twt-link {
+  display: inline-block;
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--blue);
+  text-decoration: none;
 }
