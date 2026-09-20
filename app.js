@@ -120,6 +120,8 @@ const CLOUD_CACHE_KEY = "personal-hub-cloud-cache";
 const DARK_HORIZON_DAYS = 60;
 const CLOUD_FORECAST_DAYS = 16;
 const CLOUD_CLEAR_MAX = 40;
+/** Full-enough moon to list as a lunar shoot night. */
+const MOON_SHOOT_MIN = 0.9;
 const CLOUD_CACHE_MS = 6 * 60 * 60 * 1000;
 const TWT_SCHEME = "twtapp://";
 const TWT_ANDROID_INTENT = "intent://open#Intent;scheme=twtapp;package=com.twtapp;end";
@@ -773,12 +775,19 @@ function openTwtApp(event) {
   window.open(TWT_SITE, "_blank", "noopener,noreferrer");
 }
 
+function nightTarget(iso, threshold = getDarkThreshold(), illum = moonIllumination(iso)) {
+  if (illum <= threshold) return "deep";
+  if (illum >= MOON_SHOOT_MIN) return "moon";
+  return null;
+}
+
 /**
- * Classify a dark-sky night against cloud + roster.
+ * Classify a shoot night against cloud + roster.
+ * target: deep | moon
  * kind: outing | busy | candidate
  * sky: clear | cloudy | unknown
  */
-function classifyDarkNight(iso, illum = moonIllumination(iso)) {
+function classifyShootNight(iso, illum = moonIllumination(iso), target = nightTarget(iso, getDarkThreshold(), illum)) {
   const rec = shiftForDate(iso);
   const cloud = nightCloudAvg(iso);
   const sky = cloud == null ? "unknown" : cloud <= CLOUD_CLEAR_MAX ? "clear" : "cloudy";
@@ -791,6 +800,7 @@ function classifyDarkNight(iso, illum = moonIllumination(iso)) {
     date: iso,
     illumination: illum,
     phase: moonPhaseLabel(iso),
+    target: target || "deep",
     kind,
     shift: rec ? rec.shift : null,
     cloud,
@@ -798,37 +808,35 @@ function classifyDarkNight(iso, illum = moonIllumination(iso)) {
   };
 }
 
-function isDarkNight(iso, threshold = getDarkThreshold()) {
-  return moonIllumination(iso) <= threshold;
-}
-
-/** Dark nights from today through +horizon days, sorted by date. */
-function darkNightCandidates(horizon = DARK_HORIZON_DAYS, threshold = getDarkThreshold()) {
+/** Dark-sky and full-moon nights from today through +horizon days. */
+function shootNightCandidates(horizon = DARK_HORIZON_DAYS, threshold = getDarkThreshold()) {
   const start = today();
   const list = [];
   for (let i = 0; i <= horizon; i += 1) {
     const date = addDaysIso(start, i);
     const illum = moonIllumination(date);
-    if (illum <= threshold) list.push(classifyDarkNight(date, illum));
+    const target = nightTarget(date, threshold, illum);
+    if (target) list.push(classifyShootNight(date, illum, target));
   }
   return list;
 }
 
 function outingNights(horizon = DARK_HORIZON_DAYS, threshold = getDarkThreshold()) {
-  return darkNightCandidates(horizon, threshold).filter((item) => item.kind === "outing");
+  return shootNightCandidates(horizon, threshold).filter((item) => item.kind === "outing");
 }
 
 function outingKindLabel(item) {
+  const moon = item && item.target === "moon";
   if (typeof item === "string") {
     if (item === "outing") return "可出摊";
     if (item === "busy") return "暗夜但要上班";
     return "暗夜候选";
   }
-  if (item.kind === "outing") return "可出摊";
-  if (item.kind === "busy") return "暗夜但要上班";
-  if (item.sky === "cloudy" && item.shift === "休息") return "休息但多云";
-  if (item.sky === "unknown") return "暗夜候选（无云量）";
-  return "暗夜候选";
+  if (item.kind === "outing") return moon ? "可出摊 · 拍月亮" : "可出摊 · 拍深空";
+  if (item.kind === "busy") return moon ? "拍月亮但要上班" : "暗夜但要上班";
+  if (item.sky === "cloudy" && item.shift === "休息") return moon ? "休息但多云（拍月亮）" : "休息但多云";
+  if (item.sky === "unknown") return moon ? "拍月亮候选（无云量）" : "暗夜候选（无云量）";
+  return moon ? "拍月亮候选" : "暗夜候选";
 }
 
 function skyHint(item) {
@@ -1114,15 +1122,18 @@ function renderCalendar(ym) {
     const date = isoDate(year, month, day);
     const rec = state.shifts.find((item) => item.date === date);
     const todayCls = date === today() ? " today" : "";
-    const dark = isDarkNight(date, threshold);
-    const scored = dark ? classifyDarkNight(date) : null;
+    const target = nightTarget(date, threshold);
+    const scored = target ? classifyShootNight(date) : null;
     const outing = scored?.kind === "outing";
     const cloudy = scored?.sky === "cloudy";
-    const darkCls = outing ? " dark outing" : cloudy ? " dark cloudy" : dark ? " dark" : "";
+    const themeCls = target === "moon" ? " moon-full" : target === "deep" ? " dark" : "";
+    const darkCls = `${themeCls}${outing ? " outing" : ""}${cloudy ? " cloudy" : ""}`;
     const moonTitle = scored
-      ? `暗夜 · 月照 ${fmtIllum(scored.illumination)} · ${skyHint(scored)}`
+      ? `${scored.target === "moon" ? "满月" : "暗夜"} · 月照 ${fmtIllum(scored.illumination)} · ${skyHint(scored)}`
       : "";
-    const moonMark = dark ? `<span class="cal-moon" title="${esc(moonTitle)}">月</span>` : "";
+    const moonMark = target
+      ? `<span class="cal-moon" title="${esc(moonTitle)}">${target === "moon" ? "满" : "月"}</span>`
+      : "";
     if (!rec) {
       cells.push(
         `<div class="cal-cell${todayCls}${darkCls}"><span class="cal-num">${day}</span>${moonMark}</div>`
@@ -1147,7 +1158,7 @@ function renderCalendar(ym) {
         <button class="ghost cal-nav" data-cal="1" type="button">›</button>
       </div>
       <button class="ghost cal-today" data-cal="today" type="button">今天</button>
-      <p class="meta cal-legend">「月」= 暗夜；绿色 = 休息+暗夜+较晴可出摊（需设置观测点）。</p>
+      <p class="meta cal-legend">「月」= 暗夜拍深空；「满」= 满月拍月亮。绿色/琥珀 = 休息+较晴可出摊。</p>
       <div class="cal-week">${DAYS.map((day) => `<span>${day}</span>`).join("")}</div>
       <div class="cal-grid">${cells.join("")}</div>
     </div>
@@ -1323,19 +1334,20 @@ function renderHome() {
   const shift = todayShift();
   const reminders = todayReminders();
   const upcomingOutings = outingNights(7);
-  const todayDark = isDarkNight(today()) ? classifyDarkNight(today()) : null;
+  const todayTarget = nightTarget(today());
+  const todayNight = todayTarget ? classifyShootNight(today()) : null;
   const loc = getAstroLocation();
   const shiftLine = !shift
     ? "<div>今天还没有排班。</div>"
     : isRest(shift.shift)
       ? "<div>今天休息。</div>"
       : `<div>今天上班：<b>${esc(shift.shift)}</b></div>`;
-  const todayAstroLine = todayDark
-    ? `<div>今晚${esc(outingKindLabel(todayDark))}：<b>${esc(todayDark.phase)}</b> · 月照 ${fmtIllum(todayDark.illumination)} · ${esc(skyHint(todayDark))}</div>`
+  const todayAstroLine = todayNight
+    ? `<div>今晚${esc(outingKindLabel(todayNight))}：<b>${esc(todayNight.phase)}</b> · 月照 ${fmtIllum(todayNight.illumination)} · ${esc(skyHint(todayNight))}</div>`
     : "";
   const outingLines = upcomingOutings.length
     ? outingPeekHtml(upcomingOutings, "")
-    : `<div>未来 7 天没有「休息 + 暗夜 + 较晴」可出摊。${!loc ? "请到天文页设置观测点。" : "可先导入排班，或放宽月照。"}</div>`;
+    : `<div>未来 7 天没有「休息 + 暗夜/满月 + 较晴」可出摊。${!loc ? "请到天文页设置观测点。" : "可先导入排班，或放宽月照。"}</div>`;
   return `
     <header class="top">
       <div>
@@ -1368,7 +1380,7 @@ function renderHome() {
     </section>
     <section class="card panel">
       <h2>适合出摊</h2>
-      <p class="meta">未来 7 天 · 休息 + 月照 ≤ ${Math.round(getDarkThreshold() * 100)}% + 夜间云量 ≤ ${CLOUD_CLEAR_MAX}%</p>
+      <p class="meta">未来 7 天 · 休息 +（暗夜或满月）+ 夜间云量 ≤ ${CLOUD_CLEAR_MAX}%</p>
       <p class="meta">${cloudStatusLine()}</p>
       <div class="peek">${outingLines}</div>
     </section>
@@ -1383,7 +1395,7 @@ function renderAstro() {
     meta: `${fmtDate(item.date)} · ${item.place || "地点未填"}`,
   }));
   const threshold = getDarkThreshold();
-  const candidates = darkNightCandidates();
+  const candidates = shootNightCandidates();
   const outings = candidates.filter((item) => item.kind === "outing");
   const busy = candidates.filter((item) => item.kind === "busy");
   const only = candidates.filter((item) => item.kind === "candidate");
@@ -1402,14 +1414,14 @@ function renderAstro() {
                 : hasShifts
                   ? "无排班"
                   : "未导入排班";
-          return `<div class="card item outing-card ${item.kind} sky-${item.sky}">
+          return `<div class="card item outing-card ${item.kind} sky-${item.sky} target-${item.target}">
             <h3>${fmtDate(item.date)} · ${esc(outingKindLabel(item))}</h3>
             <div class="meta">${weekday} · ${esc(item.phase)} · 月照 ${fmtIllum(item.illumination)} · ${esc(skyHint(item))} · ${esc(shiftHint)}</div>
             <button class="twt-link" type="button" data-open-twt>用天文通核对</button>
           </div>`;
         })
         .join("")
-    : empty("未来 60 天没有符合当前月照阈值的暗夜。");
+    : empty("未来 60 天没有符合当前阈值的暗夜或满月。");
   const cityList =
     citySearching
       ? `<p class="meta">正在搜索地点…</p>`
@@ -1444,13 +1456,13 @@ function renderAstro() {
     </section>
     <section class="card panel">
       <h2>适合出摊</h2>
-      <p class="meta">暗夜 + 夜间较晴（云量 ≤ ${CLOUD_CLEAR_MAX}%）+ 休息 = 可出摊。</p>
+      <p class="meta">暗夜拍深空，满月拍月亮。夜间较晴（云量 ≤ ${CLOUD_CLEAR_MAX}%）+ 休息 = 可出摊。</p>
       <div class="threshold">
         <button type="button" class="ghost ${threshold === 0.3 ? "active" : ""}" data-dark-threshold="0.3">月照 ≤ 30%</button>
         <button type="button" class="ghost ${threshold === 0.5 ? "active" : ""}" data-dark-threshold="0.5">月照 ≤ 50%</button>
       </div>
-      <p class="meta">${outings.length} 天可出摊 · ${busy.length} 天暗夜要上班 · ${only.length} 天仅候选</p>
-      ${!hasShifts ? `<p class="meta">还没有排班时只显示暗夜候选，请到工作页导入排班表。</p>` : ""}
+      <p class="meta">${outings.length} 天可出摊 · ${busy.length} 天要上班 · ${only.length} 天仅候选</p>
+      ${!hasShifts ? `<p class="meta">还没有排班时只显示候选，请到工作页导入排班表。</p>` : ""}
       <div class="list outing-list">${listHtml}</div>
     </section>
     <div class="toolbar"><span class="meta">${items.length} 条拍摄记录</span></div>

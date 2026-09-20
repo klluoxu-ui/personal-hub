@@ -576,8 +576,30 @@ textarea {
   color: var(--blue);
 }
 
-.outing-card.sky-cloudy h3 {
-  color: var(--muted);
+.outing-card.target-moon {
+  border-color: rgba(196, 154, 90, 0.4);
+}
+
+.outing-card.target-moon.outing {
+  border-color: rgba(196, 154, 90, 0.55);
+}
+
+.outing-card.target-moon.candidate h3 {
+  color: var(--amber);
+}
+
+.cal-cell.moon-full .cal-moon {
+  background: #e6d3ad;
+  color: #6b5428;
+}
+
+.cal-cell.moon-full.outing .cal-moon {
+  background: var(--amber);
+  color: #fff;
+}
+
+.cal-cell.moon-full.cloudy .cal-moon {
+  background: #d8c9a8;
 }
 
 .twt-link {
