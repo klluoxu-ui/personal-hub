@@ -1461,7 +1461,7 @@ function renderAstro() {
         <button type="button" class="ghost ${threshold === 0.3 ? "active" : ""}" data-dark-threshold="0.3">月照 ≤ 30%</button>
         <button type="button" class="ghost ${threshold === 0.5 ? "active" : ""}" data-dark-threshold="0.5">月照 ≤ 50%</button>
       </div>
-      <p class="meta">${outings.length} 天可出摊 · ${busy.length} 天要上班 · ${only.length} 天仅候选</p>
+      <p class="meta">${outings.length} 天可出摊 · ${busy.length} 天要上班 · ${only.length} 天仅候选 · 按日期排列</p>
       ${!hasShifts ? `<p class="meta">还没有排班时只显示候选，请到工作页导入排班表。</p>` : ""}
       <div class="list outing-list">${listHtml}</div>
     </section>
