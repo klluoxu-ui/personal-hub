@@ -141,6 +141,11 @@ let citySearching = false;
 let mapPicker = null;
 let astroMap = null;
 let astroMarker = null;
+let geoWatchId = null;
+let geoTimer = null;
+let geoActive = false;
+let astroAccuracy = null;
+let mapStatusText = "";
 
 const ASTRO_PLACES = [
   { keys: ["凯里市", "凯里"], name: "凯里市 · 贵州黔东南", lat: 26.57105, lon: 107.97695 },
@@ -150,7 +155,7 @@ const ASTRO_PLACES = [
     lat: 26.38722,
     lon: 108.20255,
   },
-  { keys: ["雷山县", "雷山"], name: "雷山县 · 贵州黔东南", lat: 26.38254, lon: 108.07531 },
+  { keys: ["南山区", "深圳南山", "南山"], name: "南山区 · 深圳", lat: 22.53332, lon: 113.93037 },
 ];
 
 const GEO_KEEP = new Set(["place", "boundary", "natural", "tourism", "leisure", "peak"]);
@@ -331,7 +336,7 @@ function stripPlaceSuffix(query) {
 
 function regionHint(query) {
   const match = query.match(
-    /北京|天津|上海|重庆|河北|山西|辽宁|吉林|黑龙江|江苏|浙江|安徽|福建|江西|山东|河南|湖北|湖南|广东|海南|四川|贵州|云南|陕西|甘肃|青海|台湾|内蒙古|广西|西藏|宁夏|新疆|香港|澳门|黔东南|黔南|黔西南|雷山|凯里/
+    /北京|天津|上海|重庆|河北|山西|辽宁|吉林|黑龙江|江苏|浙江|安徽|福建|江西|山东|河南|湖北|湖南|广东|海南|四川|贵州|云南|陕西|甘肃|青海|台湾|内蒙古|广西|西藏|宁夏|新疆|香港|澳门|深圳|黔东南|黔南|黔西南|雷山|凯里/
   );
   return match ? match[0] : "";
 }
@@ -432,22 +437,8 @@ async function searchCity(query) {
 }
 
 function locateAstro() {
-  if (!navigator.geolocation) {
-    alert("当前浏览器不支持定位，请用地图选点。");
-    return;
-  }
-  navigator.geolocation.getCurrentPosition(
-    (pos) => {
-      setAstroLocation({
-        name: "当前位置",
-        lat: pos.coords.latitude,
-        lon: pos.coords.longitude,
-      });
-      render();
-    },
-    () => alert("定位失败，请改用地图选点或地点搜索。"),
-    { enableHighAccuracy: false, timeout: 12000 }
-  );
+  openMapPicker();
+  panMapToMe();
 }
 
 function loadLeaflet() {
@@ -477,13 +468,31 @@ function openMapPicker() {
   render();
 }
 
+function stopGeoWatch() {
+  geoActive = false;
+  if (geoWatchId != null && navigator.geolocation) {
+    navigator.geolocation.clearWatch(geoWatchId);
+  }
+  geoWatchId = null;
+  if (geoTimer != null) clearTimeout(geoTimer);
+  geoTimer = null;
+}
+
+function clearAccuracyCircle() {
+  if (astroAccuracy && astroMap) astroMap.removeLayer(astroAccuracy);
+  astroAccuracy = null;
+}
+
 function closeMapPicker() {
+  stopGeoWatch();
+  clearAccuracyCircle();
   if (astroMap) {
     astroMap.remove();
     astroMap = null;
   }
   astroMarker = null;
   mapPicker = null;
+  mapStatusText = "";
 }
 
 function outOfChina(lat, lon) {
@@ -527,11 +536,30 @@ function gcj02ToWgs84(lat, lon) {
   return { lat: lat - dLat, lon: lon - dLon };
 }
 
-function setMapMarker(latWgs, lonWgs) {
+function setMapMarker(latWgs, lonWgs, zoom) {
   if (!astroMap || !window.L) return;
   const gcj = wgs84ToGcj02(latWgs, lonWgs);
   if (astroMarker) astroMarker.setLatLng([gcj.lat, gcj.lon]);
-  astroMap.setView([gcj.lat, gcj.lon], Math.max(astroMap.getZoom(), 12));
+  const nextZoom = zoom == null ? Math.max(astroMap.getZoom(), 12) : zoom;
+  astroMap.setView([gcj.lat, gcj.lon], nextZoom);
+}
+
+function setAccuracyCircle(latWgs, lonWgs, radiusM) {
+  if (!astroMap || !window.L) return;
+  const gcj = wgs84ToGcj02(latWgs, lonWgs);
+  const radius = Math.max(Number(radiusM) || 0, 20);
+  if (astroAccuracy) {
+    astroAccuracy.setLatLng([gcj.lat, gcj.lon]);
+    astroAccuracy.setRadius(radius);
+    return;
+  }
+  astroAccuracy = window.L.circle([gcj.lat, gcj.lon], {
+    radius,
+    color: "#4d7ec8",
+    weight: 1,
+    fillColor: "#4d7ec8",
+    fillOpacity: 0.12,
+  }).addTo(astroMap);
 }
 
 async function reversePlaceName(lat, lon) {
@@ -551,19 +579,29 @@ async function reversePlaceName(lat, lon) {
   }
 }
 
+function setMapStatus(text) {
+  mapStatusText = text || "";
+  const el = document.querySelector("[data-map-status]");
+  if (el) el.textContent = mapStatusText;
+}
+
 function updateMapPickerMeta() {
   const el = document.querySelector("[data-map-meta]");
   if (!el || !mapPicker) return;
   el.textContent = `${mapPicker.lat.toFixed(4)}, ${mapPicker.lon.toFixed(4)} · ${mapPicker.name || "地图选点"}`;
 }
 
-async function applyMapPoint(lat, lon, fallbackName) {
+async function applyMapPoint(lat, lon, fallbackName, opts = {}) {
   if (!mapPicker) return;
   mapPicker.lat = lat;
   mapPicker.lon = lon;
   mapPicker.name = fallbackName || "地图选点";
-  setMapMarker(lat, lon);
+  const acc = Number(opts.accuracy);
+  if (Number.isFinite(acc) && acc > 0) setAccuracyCircle(lat, lon, acc);
+  else clearAccuracyCircle();
+  setMapMarker(lat, lon, opts.zoom);
   updateMapPickerMeta();
+  if (opts.skipReverse) return;
   const name = await reversePlaceName(lat, lon);
   if (mapPicker) {
     mapPicker.name = name || fallbackName || "地图选点";
@@ -577,13 +615,14 @@ async function mountAstroMap() {
   try {
     await loadLeaflet();
   } catch {
-    el.innerHTML = `<p class="meta">地图加载失败，请改用地点搜索，或用下面的苹果地图 / 高德打开。</p>`;
+    el.innerHTML = `<p class="meta">地图加载失败，请改用地点搜索，例如「南山区」。</p>`;
     return;
   }
   if (astroMap) {
     astroMap.remove();
     astroMap = null;
     astroMarker = null;
+    astroAccuracy = null;
   }
   const gcj = wgs84ToGcj02(mapPicker.lat, mapPicker.lon);
   const map = window.L.map(el, { zoomControl: true }).setView([gcj.lat, gcj.lon], 12);
@@ -600,8 +639,10 @@ async function mountAstroMap() {
     fillOpacity: 0.9,
   }).addTo(map);
   map.on("click", (event) => {
+    stopGeoWatch();
     const wgs = gcj02ToWgs84(event.latlng.lat, event.latlng.lng);
-    applyMapPoint(wgs.lat, wgs.lon, "地图选点");
+    applyMapPoint(wgs.lat, wgs.lon, "地图选点", { zoom: 16 });
+    setMapStatus("已用你点的位置。");
   });
   astroMap = map;
   setTimeout(() => map.invalidateSize(), 80);
@@ -613,13 +654,10 @@ function mapPickerHtml() {
     <div class="sheet">
       <div class="map-picker">
         <div class="toolbar"><h2>地图选点</h2><button type="button" class="ghost" data-close>关闭</button></div>
-        <p class="meta">底图是高德。点地图选观测点；也可用苹果地图或高德 App 打开当前点。</p>
+        <p class="meta">底图是高德。直接点地图选观测点。苹果地图/高德 App 选完无法把坐标送回这个网页，所以那两个按钮已去掉。</p>
         <div id="astro-map" class="astro-map"></div>
         <p class="meta" data-map-meta>${mapPicker.lat.toFixed(4)}, ${mapPicker.lon.toFixed(4)} · ${esc(mapPicker.name || "地图选点")}</p>
-        <div class="actions">
-          <button class="secondary" type="button" data-map-apple>苹果地图</button>
-          <button class="secondary" type="button" data-map-amap>高德地图</button>
-        </div>
+        <p class="meta map-status" data-map-status>${esc(mapStatusText)}</p>
         <div class="actions">
           <button class="secondary" type="button" data-map-locate>定位到我</button>
           <button class="primary" type="button" data-map-confirm>使用此点</button>
@@ -629,51 +667,78 @@ function mapPickerHtml() {
   `;
 }
 
-async function locateByIp() {
-  try {
-    const res = await fetch("https://get.geojs.io/v1/ip/geo.json");
-    if (!res.ok) return null;
-    const json = await res.json();
-    const lat = Number(json.latitude);
-    const lon = Number(json.longitude);
-    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
-    const name = [json.city, json.region].filter(Boolean).join(" · ") || "大致位置";
-    return { lat, lon, name: `${name}（大致位置）` };
-  } catch {
-    return null;
-  }
+function geoAccuracy(pos) {
+  return Math.round(Number(pos?.coords?.accuracy) || 0);
 }
 
 function panMapToMe() {
-  const fail = async () => {
-    const approx = await locateByIp();
-    if (approx) {
-      applyMapPoint(approx.lat, approx.lon, approx.name);
+  if (!navigator.geolocation) {
+    setMapStatus("当前浏览器不给定位。请在图上点选，或先搜索「南山区」。");
+    return;
+  }
+  stopGeoWatch();
+  geoActive = true;
+  setMapStatus("正在等精确 GPS。室内或基站定位常会落到福田，请稍候或直接点南山区。");
+  let best = null;
+  const preview = (pos) => {
+    const acc = geoAccuracy(pos);
+    applyMapPoint(pos.coords.latitude, pos.coords.longitude, `粗定位（约 ${acc} 米），请再点选`, {
+      skipReverse: true,
+      accuracy: acc,
+      zoom: acc > 800 ? 12 : 14,
+    });
+    setMapStatus(`还在等 GPS（当前约 ${acc} 米）。若停在福田，不要点「使用此点」，请再点到实际位置。`);
+  };
+  const accept = (pos) => {
+    if (!geoActive) return;
+    stopGeoWatch();
+    const acc = geoAccuracy(pos);
+    const precise = acc <= 80;
+    applyMapPoint(
+      pos.coords.latitude,
+      pos.coords.longitude,
+      precise ? "当前位置" : `当前位置（精度约 ${acc} 米）`,
+      { skipReverse: !precise, accuracy: acc, zoom: precise ? 16 : 14 }
+    );
+    if (precise) setMapStatus(`已定位，精度约 ${acc} 米。`);
+    else setMapStatus(`定位仍偏粗（约 ${acc} 米），南山和福田可能分不清。请再点到你所在位置。`);
+  };
+  const finishCoarse = () => {
+    if (!geoActive) return;
+    stopGeoWatch();
+    if (best) {
+      preview(best);
+      setMapStatus("没有收到精确 GPS。请在高德图上点到实际位置，或先搜索「南山区」。");
       return;
     }
-    alert("当前浏览器不给定位权限。请拖动高德地图点选，或先用地点搜索。");
+    setMapStatus("没有收到精确 GPS。请在高德图上点到实际位置，或先搜索「南山区」。");
   };
-  if (!navigator.geolocation) {
-    fail();
-    return;
-  }
-  navigator.geolocation.getCurrentPosition(
-    (pos) => applyMapPoint(pos.coords.latitude, pos.coords.longitude, "当前位置"),
-    fail,
-    { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
+  geoTimer = setTimeout(() => {
+    if (best && geoAccuracy(best) <= 250) accept(best);
+    else finishCoarse();
+  }, 18000);
+  geoWatchId = navigator.geolocation.watchPosition(
+    (pos) => {
+      if (!geoActive) return;
+      if (!best || pos.coords.accuracy < best.coords.accuracy) best = pos;
+      if (pos.coords.accuracy <= 60) accept(pos);
+      else preview(pos);
+    },
+    (err) => {
+      if (!geoActive) return;
+      if (best && geoAccuracy(best) <= 250) {
+        accept(best);
+        return;
+      }
+      if (err && err.code === 1) {
+        stopGeoWatch();
+        setMapStatus("没有定位权限。请点地图，或先搜索「南山区」。");
+        return;
+      }
+      finishCoarse();
+    },
+    { enableHighAccuracy: true, maximumAge: 0, timeout: 20000 }
   );
-}
-
-function openNativeMap(kind) {
-  if (!mapPicker) return;
-  const lat = mapPicker.lat;
-  const lon = mapPicker.lon;
-  const q = encodeURIComponent(mapPicker.name || "观测点");
-  if (kind === "apple") {
-    location.href = `https://maps.apple.com/?ll=${lat},${lon}&q=${q}`;
-    return;
-  }
-  location.href = `https://uri.amap.com/marker?position=${lon},${lat}&name=${q}&coordinate=wgs84&callnative=1`;
 }
 
 function confirmMapPicker() {
@@ -1365,12 +1430,12 @@ function renderAstro() {
       </div>
       <form class="city-form" data-city-search>
         <label>地点搜索
-          <input name="city" type="search" placeholder="凯里市 / 雷公山风景区" value="${esc(cityQuery)}" autocomplete="off" />
+          <input name="city" type="search" placeholder="南山区 / 凯里市 / 雷公山风景区" value="${esc(cityQuery)}" autocomplete="off" />
         </label>
         <button class="secondary" type="submit">搜索</button>
       </form>
       ${cityList}
-      <p class="meta">城市、景区都可搜；定位失败时用地图点选。云量来自 Open-Meteo（约 16 天）。</p>
+      <p class="meta">城市、景区都可搜。浏览器粗定位常会落到福田，请打开地图选点后再点，或搜「南山区」。云量来自 Open-Meteo（约 16 天）。</p>
     </section>
     <section class="card panel">
       <h2>适合出摊</h2>
@@ -1761,8 +1826,6 @@ document.addEventListener("click", (event) => {
   const mapOpen = event.target.closest("[data-map-open]");
   const mapConfirm = event.target.closest("[data-map-confirm]");
   const mapLocate = event.target.closest("[data-map-locate]");
-  const mapApple = event.target.closest("[data-map-apple]");
-  const mapAmap = event.target.closest("[data-map-amap]");
   const openTwt = event.target.closest("[data-open-twt]");
   if (event.target.classList.contains("sheet")) closeSheet();
   if (cal) {
@@ -1785,14 +1848,6 @@ document.addEventListener("click", (event) => {
   }
   if (mapLocate) {
     panMapToMe();
-    return;
-  }
-  if (mapApple) {
-    openNativeMap("apple");
-    return;
-  }
-  if (mapAmap) {
-    openNativeMap("amap");
     return;
   }
   if (openTwt) {

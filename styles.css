@@ -594,3 +594,8 @@ textarea {
   margin: 8px 0;
   background: #e8edf5;
 }
+
+.map-status {
+  color: var(--blue);
+  min-height: 1.4em;
+}
